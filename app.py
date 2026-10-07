@@ -179,7 +179,7 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
         prior_red_streak = monthly_df['red_streak_count'].iloc[i-1]
         setup_valid = (prior_red_streak >= 1) and (not t1['is_bear'])
         
-        # 1. 12-Month Low Capitulation Filter on preceding red bar
+        # 1. 12-Month Low Capitulation Filter
         if require_12m_low_red:
             if pd.isna(monthly_df['Close_Min_12'].iloc[i-1]):
                 setup_valid = False
@@ -247,7 +247,7 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
                 exit_hit, reason = True, "Target Hit"
                 exit_px = max(row['Open'], target_price)
                 
-            # Breakdown of Prior Month Low
+            # Prior Month Low Breakdown
             elif exit_type == "Prior Month Low Breakdown":
                 prior_ym = (date.replace(day=1) - timedelta(days=1)).strftime('%Y-%m')
                 if prior_ym in monthly_stats and row['Low'] < monthly_stats[prior_ym]['low']:
@@ -297,7 +297,7 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
                     entry_adj_close = row['Adj Close']
                     target_price = entry_price + (target_mult * setup['width']) if target_mult else None
                     
-                    # Same-day intra-day checks
+                    # Same-day execution checks
                     if row['Low'] <= stop_price:
                         exit_px = min(row['Open'], stop_price)
                         adj_ratio_entry = entry_adj_close / entry_raw_close
@@ -664,24 +664,40 @@ with tab_scanner:
             
             hist_daily_data = yf.download(cand_tickers, period="20y", interval="1d", group_by="ticker", auto_adjust=False, progress=False, threads=True)
             
-            win_rates, tot_rets = [], []
+            win_rates, tot_rets, bh_rets, sys_dds, bh_dds = [], [], [], [], []
             for sym in cand_tickers:
                 try:
                     df_sym = hist_daily_data[sym].copy() if len(cand_tickers) > 1 else hist_daily_data.copy()
                     if isinstance(df_sym.columns, pd.MultiIndex): df_sym.columns = [c[0] for c in df_sym.columns]
                     
+                    # 20yr Buy & Hold calculations
+                    bh_ret = ((df_sym['Adj Close'].iloc[-1] / df_sym['Adj Close'].iloc[0]) - 1) * 100
+                    bh_cummax = df_sym['Adj Close'].cummax()
+                    bh_dd = ((df_sym['Adj Close'] - bh_cummax) / bh_cummax).min() * 100
+
                     df_monthly_hist = build_monthly_from_daily(df_sym)
                     _, m, _, _ = run_daily_execution_backtest(
                         df_sym, df_monthly_hist, scan_exit_mode, hold_months_n, 
                         tick_size, init_cash, trade_after_loss_only, require_uptrend, require_12m_low_red 
                     )
+                    
                     win_rates.append(round(m.get('Win Rate (%)', 0), 1))
                     tot_rets.append(round(m.get('Total Return (%)', 0), 1))
+                    bh_rets.append(round(bh_ret, 1))
+                    sys_dds.append(round(m.get('Max Drawdown (%)', 0), 1))
+                    bh_dds.append(round(bh_dd, 1))
                 except Exception:
-                    win_rates.append(0.0); tot_rets.append(0.0)
+                    win_rates.append(0.0)
+                    tot_rets.append(0.0)
+                    bh_rets.append(0.0)
+                    sys_dds.append(0.0)
+                    bh_dds.append(0.0)
 
-            cand_df['20yr Win Rate (%)'] = win_rates
             cand_df['20yr Return (%)'] = tot_rets
+            cand_df['20yr B&H Return (%)'] = bh_rets
+            cand_df['System Max DD (%)'] = sys_dds
+            cand_df['B&H Max DD (%)'] = bh_dds
+            cand_df['20yr Win Rate (%)'] = win_rates
             
             progress_bar.progress(100); status_text.empty()
             
@@ -706,10 +722,10 @@ with tab_scanner:
                     help="Stock or ETF ticker symbol."
                 ),
                 "Status": st.column_config.TextColumn(
-                    help="Breakout Status:\n• 'Active Breakout': High breached the trigger this month without hitting the stop.\n• 'Pending': Waiting for price to cross above trigger.\n• 'Stopped Out': Triggered but subsequently breached stop-loss."
+                    help="Breakout Status:\n• 'Active Breakout': High breached trigger this month without hitting stop.\n• 'Pending': Waiting for price to cross above trigger.\n• 'Stopped Out': Triggered but subsequently breached stop-loss."
                 ),
                 "Prior Reds": st.column_config.NumberColumn(
-                    help="Consecutive nominal red months (Close < Open) immediately preceding the green signal month.",
+                    help="Consecutive red months (Close < Open) immediately preceding the green signal month.",
                     format="%d"
                 ),
                 "Avg Vol (M)": st.column_config.NumberColumn(
@@ -717,7 +733,7 @@ with tab_scanner:
                     format="%.1fM"
                 ),
                 "Current Price": st.column_config.NumberColumn(
-                    help="Latest closing or real-time daily trading price.",
+                    help="Latest daily closing/trading price.",
                     format="$%.2f"
                 ),
                 "Trigger Price": st.column_config.NumberColumn(
@@ -725,11 +741,11 @@ with tab_scanner:
                     format="$%.2f"
                 ),
                 "Dist to Trigger (%)": st.column_config.NumberColumn(
-                    help="Proximity Indicator:\n• Pending: Gain required to reach trigger: (Trigger - Current) / Current.\n• Active: Distance traded above (+) or faded below (-) trigger: (Current - Trigger) / Trigger.",
+                    help="Proximity Indicator:\n• Pending: Gain needed to reach trigger.\n• Active: Distance trading above (+) or faded below (-) trigger.",
                     format="%+.2f%%"
                 ),
                 "Stop Loss": st.column_config.NumberColumn(
-                    help="Universal Protective Stop: Low of green signal month (T-1) - tick size ($0.01).",
+                    help="Universal Stop: Low of green signal month (T-1) - tick size ($0.01).",
                     format="$%.2f"
                 ),
                 "Target 3x": st.column_config.NumberColumn(
@@ -737,22 +753,56 @@ with tab_scanner:
                     format="$%.2f"
                 ),
                 "20yr Return (%)": st.column_config.NumberColumn(
-                    help="Cumulative compounded strategy return across 20 years for this symbol using the selected exit rule.",
+                    help="Strategy Return: Compounded strategy return over 20 years using the selected exit rule. Highlighted GREEN if it beats Buy & Hold, RED if it underperforms.",
                     format="%.2f%%"
                 ),
+                "20yr B&H Return (%)": st.column_config.NumberColumn(
+                    help="Buy & Hold Return: Baseline compounded 20-year return from simply holding the asset.",
+                    format="%.2f%%"
+                ),
+                "System Max DD (%)": st.column_config.NumberColumn(
+                    help="System Drawdown: Worst peak-to-trough account drawdown suffered by this strategy over 20 years.",
+                    format="%.1f%%"
+                ),
+                "B&H Max DD (%)": st.column_config.NumberColumn(
+                    help="Buy & Hold Drawdown: Worst peak-to-trough drawdown suffered by simply holding the asset over 20 years.",
+                    format="%.1f%%"
+                ),
                 "20yr Win Rate (%)": st.column_config.ProgressColumn(
-                    help="Historical percentage of winning trades over the past 20 years using the selected exit rule.",
+                    help="Strategy Win Rate: Percentage of completed trades that produced a positive return.",
                     format="%.1f%%",
                     min_value=0,
                     max_value=100
                 )
             }
             
+            # Row styling function to highlight 20yr Return against Buy & Hold
+            def highlight_vs_bh(row):
+                styles = [''] * len(row)
+                if '20yr Return (%)' in row.index and '20yr B&H Return (%)' in row.index:
+                    col_idx = row.index.get_loc('20yr Return (%)')
+                    sys_ret = row['20yr Return (%)']
+                    bh_ret = row['20yr B&H Return (%)']
+                    if pd.notna(sys_ret) and pd.notna(bh_ret):
+                        if sys_ret >= bh_ret:
+                            styles[col_idx] = 'background-color: rgba(0, 200, 83, 0.25); color: #00FF66; font-weight: bold;'
+                        else:
+                            styles[col_idx] = 'background-color: rgba(255, 51, 85, 0.25); color: #FF4B4B; font-weight: bold;'
+                return styles
+
             st.subheader(f"🟢 Active Breakouts ({len(active)})")
-            st.dataframe(active, column_config=scanner_config, use_container_width=True)
+            if not active.empty:
+                styled_active = active.style.apply(highlight_vs_bh, axis=1)
+                st.dataframe(styled_active, column_config=scanner_config, use_container_width=True)
+            else:
+                st.info("No active breakouts found matching current filters.")
             
             st.subheader(f"🟡 Pending Setups Waiting for Breakout ({len(pending)})")
-            st.dataframe(pending, column_config=scanner_config, use_container_width=True)
+            if not pending.empty:
+                styled_pending = pending.style.apply(highlight_vs_bh, axis=1)
+                st.dataframe(styled_pending, column_config=scanner_config, use_container_width=True)
+            else:
+                st.info("No pending setups found matching current filters.")
         else:
             progress_bar.progress(100); status_text.empty()
             st.info(f"No valid setups found in {universe_choice} matching current filters.")
