@@ -12,7 +12,7 @@ st.set_page_config(page_title="Pro Monthly Breakout Platform", layout="wide")
 st.title("🕯️ Pro Monthly Breakout Platform")
 st.caption(
     "Setup: Consecutive Red Months -> 1 Green Month -> Buy Breakout. "
-    "Execution Engine: Daily Data with Gap Modeling, Regime Tracking & 12-Month Low Capitulation Filtering."
+    "Execution Engine: Daily Data with Gap Modeling, Regime Tracking & Capitulation Tagging."
 )
 
 # ==========================================
@@ -144,6 +144,7 @@ def build_monthly_from_daily(daily_df):
     
     monthly['SMA_12'] = monthly['Close'].rolling(window=12).mean()
     monthly['Close_Min_12'] = monthly['Close'].rolling(window=12).min()
+    monthly['Close_Min_6'] = monthly['Close'].rolling(window=6).min()
     
     monthly['is_bear'] = monthly['Close'] < monthly['Open']
     red_streaks = []
@@ -166,7 +167,7 @@ def convert_df_to_csv(df):
 # BACKTEST EXECUTION ENGINE
 # ==========================================
 
-def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_size, init_cash, trade_after_loss_only=False, require_uptrend=False, require_12m_low_red=False):
+def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_size, init_cash, trade_after_loss_only=False, require_uptrend=False, capitulation_filter="None"):
     setups = {}
     monthly_stats = {}
     
@@ -179,14 +180,28 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
         prior_red_streak = monthly_df['red_streak_count'].iloc[i-1]
         setup_valid = (prior_red_streak >= 1) and (not t1['is_bear'])
         
-        # 1. 12-Month Low Capitulation Filter
-        if require_12m_low_red:
-            if pd.isna(monthly_df['Close_Min_12'].iloc[i-1]):
-                setup_valid = False
-            elif t2['Close'] > (monthly_df['Close_Min_12'].iloc[i-1] + 1e-4):
-                setup_valid = False
+        # Determine Capitulation Level for t2
+        is_12m = False
+        is_6m = False
+        if not pd.isna(monthly_df['Close_Min_12'].iloc[i-1]):
+            is_12m = t2['Close'] <= (monthly_df['Close_Min_12'].iloc[i-1] + 1e-4)
+        if not pd.isna(monthly_df['Close_Min_6'].iloc[i-1]):
+            is_6m = t2['Close'] <= (monthly_df['Close_Min_6'].iloc[i-1] + 1e-4)
 
-        # 2. Long-Term Trend Filter
+        if is_12m:
+            cap_tag = "12-Month"
+        elif is_6m:
+            cap_tag = "6-Month"
+        else:
+            cap_tag = "None"
+
+        # Capitulation Filter Rule
+        if capitulation_filter == "12-Month Low" and not is_12m:
+            setup_valid = False
+        elif capitulation_filter == "6-Month Low" and not is_6m:
+            setup_valid = False
+
+        # Long-Term Trend Filter
         if require_uptrend and not pd.isna(t1['SMA_12']):
             if t1['Close'] <= t1['SMA_12']:
                 setup_valid = False
@@ -195,6 +210,7 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
             exec_ym = (t1.name + pd.DateOffset(days=15)).strftime('%Y-%m') 
             setups[exec_ym] = {
                 'prior_reds': prior_red_streak,
+                'capitulation': cap_tag,
                 'trigger': t1['High'] + tick_size,
                 'stop': t1['Low'] - tick_size,
                 'width': t1['High'] - t1['Low']
@@ -214,6 +230,7 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
     current_ym = None
     months_held = 0
     active_prior_reds = 0
+    active_cap_tag = "None"
     entry_date = None
     entry_price = 0.0
     entry_raw_close = 1.0
@@ -271,6 +288,7 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
                 trade_ret = ((exit_px * adj_ratio_exit) - (entry_price * adj_ratio_entry)) / (entry_price * adj_ratio_entry)
                 
                 all_phantom_trades.append({
+                    "Capitulation": active_cap_tag,
                     "Prior Red Months": active_prior_reds,
                     "Entry Date": entry_date.strftime('%Y-%m-%d'), "Entry Price": round(entry_price, 2),
                     "Exit Date": date.strftime('%Y-%m-%d'), "Exit Price": round(exit_px, 2),
@@ -291,6 +309,7 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
                     months_held = 0
                     
                     active_prior_reds = setup['prior_reds']
+                    active_cap_tag = setup['capitulation']
                     stop_price = setup['stop']
                     entry_price = max(row['Open'], setup['trigger'])
                     entry_raw_close = row['Close']
@@ -305,6 +324,7 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
                         trade_ret = ((exit_px * adj_ratio_exit) - (entry_price * adj_ratio_entry)) / (entry_price * adj_ratio_entry)
                         
                         all_phantom_trades.append({
+                            "Capitulation": active_cap_tag,
                             "Prior Red Months": active_prior_reds,
                             "Entry Date": entry_date.strftime('%Y-%m-%d'), "Entry Price": round(entry_price, 2),
                             "Exit Date": date.strftime('%Y-%m-%d'), "Exit Price": round(exit_px, 2),
@@ -319,6 +339,7 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
                         trade_ret = ((exit_px * adj_ratio_exit) - (entry_price * adj_ratio_entry)) / (entry_price * adj_ratio_entry)
                         
                         all_phantom_trades.append({
+                            "Capitulation": active_cap_tag,
                             "Prior Red Months": active_prior_reds,
                             "Entry Date": entry_date.strftime('%Y-%m-%d'), "Entry Price": round(entry_price, 2),
                             "Exit Date": date.strftime('%Y-%m-%d'), "Exit Price": round(exit_px, 2),
@@ -392,10 +413,11 @@ with tab_backtest:
     with st.sidebar.expander("⚙️ Advanced Filters & Risk", expanded=True):
         tick_size = st.number_input("Breakout Tick Size ($)", min_value=0.01, value=0.01, key="bt_tick")
         init_cash = st.number_input("Starting Capital ($)", value=10000, key="bt_cash")
-        require_12m_low_red = st.checkbox(
-            "Capitulation Filter: Last Red Close is 12-Mo Low", 
-            value=True, 
-            help="Requires the closing price of the most recent red bar prior to the signal bar to have made a 12-month low."
+        capitulation_filter = st.selectbox(
+            "Capitulation Filter (Prior Red Close)", 
+            options=["None", "6-Month Low", "12-Month Low"],
+            index=0,
+            help="Filters for trades where the last red bar closed at a 6-month or 12-month low."
         )
         require_uptrend = st.checkbox(
             "Bull Market Filter (Close > 12-Month SMA)", 
@@ -408,6 +430,9 @@ with tab_backtest:
         )
 
     trade_col_config = {
+        "Capitulation": st.column_config.TextColumn(
+            help="Capitulation depth of preceding red month: '12-Month', '6-Month', or 'None'."
+        ),
         "Prior Red Months": st.column_config.NumberColumn(
             help="Number of consecutive red (Close < Open) months preceding the green signal month.",
             format="%d"
@@ -456,7 +481,7 @@ with tab_backtest:
                     for strat in variants:
                         t_df, m, eq, _ = run_daily_execution_backtest(
                             df_daily, df_monthly, strat, hold_months_n, tick_size, 
-                            init_cash, trade_after_loss_only, require_uptrend, require_12m_low_red
+                            init_cash, trade_after_loss_only, require_uptrend, capitulation_filter
                         )
                         curves[strat] = eq
                         row = {"Exit Strategy": strat}
@@ -473,7 +498,7 @@ with tab_backtest:
                 with st.spinner(f"Running exact daily execution for {ticker}..."):
                     t_df, metrics, eq, dd = run_daily_execution_backtest(
                         df_daily, df_monthly, exit_mode, hold_months_n, tick_size, 
-                        init_cash, trade_after_loss_only, require_uptrend, require_12m_low_red
+                        init_cash, trade_after_loss_only, require_uptrend, capitulation_filter
                     )
                 
                 c1, c2, c3, c4, c5 = st.columns(5)
@@ -580,11 +605,11 @@ with tab_scanner:
             
         progress_bar.progress(10)
         
-        status_text.text(f"Phase 2: Downloading last 24 months of daily data (evaluating 12-month low & 12MA)...")
+        status_text.text(f"Phase 2: Downloading last 24 months of daily data (evaluating 6M/12M lows & 12MA)...")
         bulk_data = yf.download(universe, period="24mo", interval="1d", group_by="ticker", auto_adjust=False, progress=False, threads=True)
         progress_bar.progress(50)
         
-        status_text.text("Phase 3: Running precise evaluations & capitulation filters...")
+        status_text.text("Phase 3: Running precise evaluations & tagging capitulation levels...")
         candidates = []
         for sym in universe:
             try:
@@ -603,14 +628,22 @@ with tab_scanner:
                 
                 setup_valid = (prior_reds >= 1) and (not bar_t1['is_bear'])
                 
-                # 1. 12-Month Low Capitulation Filter
-                if require_12m_low_red:
-                    if pd.isna(df_monthly['Close_Min_12'].iloc[-3]):
-                        setup_valid = False
-                    elif bar_t2['Close'] > (df_monthly['Close_Min_12'].iloc[-3] + 1e-4):
-                        setup_valid = False
+                # Tag Capitulation Level (Displayed as column, NOT filtered out)
+                is_12m = False
+                is_6m = False
+                if not pd.isna(df_monthly['Close_Min_12'].iloc[-3]):
+                    is_12m = bar_t2['Close'] <= (df_monthly['Close_Min_12'].iloc[-3] + 1e-4)
+                if not pd.isna(df_monthly['Close_Min_6'].iloc[-3]):
+                    is_6m = bar_t2['Close'] <= (df_monthly['Close_Min_6'].iloc[-3] + 1e-4)
 
-                # 2. Bull Market Filter
+                if is_12m:
+                    cap_tag = "12-Month"
+                elif is_6m:
+                    cap_tag = "6-Month"
+                else:
+                    cap_tag = "None"
+
+                # Bull Market Filter
                 if require_uptrend and not pd.isna(bar_t1['SMA_12']):
                     if bar_t1['Close'] <= bar_t1['SMA_12']:
                         setup_valid = False
@@ -645,6 +678,7 @@ with tab_scanner:
                 candidates.append({
                     "Ticker": sym, 
                     "Status": status, 
+                    "Capitulation": cap_tag,
                     "Prior Reds": prior_reds,
                     "Avg Vol (M)": round(avg_vol_m, 1),
                     "Current Price": curr_px, 
@@ -670,7 +704,6 @@ with tab_scanner:
                     df_sym = hist_daily_data[sym].copy() if len(cand_tickers) > 1 else hist_daily_data.copy()
                     if isinstance(df_sym.columns, pd.MultiIndex): df_sym.columns = [c[0] for c in df_sym.columns]
                     
-                    # 20yr Buy & Hold calculations
                     bh_ret = ((df_sym['Adj Close'].iloc[-1] / df_sym['Adj Close'].iloc[0]) - 1) * 100
                     bh_cummax = df_sym['Adj Close'].cummax()
                     bh_dd = ((df_sym['Adj Close'] - bh_cummax) / bh_cummax).min() * 100
@@ -678,7 +711,7 @@ with tab_scanner:
                     df_monthly_hist = build_monthly_from_daily(df_sym)
                     _, m, _, _ = run_daily_execution_backtest(
                         df_sym, df_monthly_hist, scan_exit_mode, hold_months_n, 
-                        tick_size, init_cash, trade_after_loss_only, require_uptrend, require_12m_low_red 
+                        tick_size, init_cash, trade_after_loss_only, require_uptrend, capitulation_filter 
                     )
                     
                     win_rates.append(round(m.get('Win Rate (%)', 0), 1))
@@ -724,6 +757,9 @@ with tab_scanner:
                 "Status": st.column_config.TextColumn(
                     help="Breakout Status:\n• 'Active Breakout': High breached trigger this month without hitting stop.\n• 'Pending': Waiting for price to cross above trigger.\n• 'Stopped Out': Triggered but subsequently breached stop-loss."
                 ),
+                "Capitulation": st.column_config.TextColumn(
+                    help="Capitulation Status of the T-2 Red Month:\n• '12-Month': Prior red month closed at a 12-month low.\n• '6-Month': Prior red month closed at a 6-month low (but not 12-month).\n• 'None': Pullback did not make a 6-month or 12-month closing low."
+                ),
                 "Prior Reds": st.column_config.NumberColumn(
                     help="Consecutive red months (Close < Open) immediately preceding the green signal month.",
                     format="%d"
@@ -741,7 +777,7 @@ with tab_scanner:
                     format="$%.2f"
                 ),
                 "Dist to Trigger (%)": st.column_config.NumberColumn(
-                    help="Proximity Indicator:\n• Pending: Gain needed to reach trigger.\n• Active: Distance trading above (+) or faded below (-) trigger.",
+                    help="Proximity Indicator:\n• Pending: Gain needed to reach trigger: (Trigger - Current) / Current.\n• Active: Distance trading above (+) or faded below (-) trigger: (Current - Trigger) / Trigger.",
                     format="%+.2f%%"
                 ),
                 "Stop Loss": st.column_config.NumberColumn(
@@ -776,7 +812,6 @@ with tab_scanner:
                 )
             }
             
-            # Row styling function to highlight 20yr Return against Buy & Hold
             def highlight_vs_bh(row):
                 styles = [''] * len(row)
                 if '20yr Return (%)' in row.index and '20yr B&H Return (%)' in row.index:
