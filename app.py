@@ -5,48 +5,113 @@ import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import requests
+import re
 
-st.set_page_config(page_title="Pro Breakout Platform", layout="wide")
+st.set_page_config(page_title="Pro Monthly Breakout Platform", layout="wide")
 
 st.title("🕯️ Pro Monthly Breakout Platform")
 st.caption(
     "Setup: Consecutive Red Months -> 1 Green Month -> Buy Breakout. "
-    "Execution Engine: Daily Data with Phantom Tracking & Trend Filtering."
+    "Execution Engine: Daily Data with Phantom Tracking, Gap Modeling & Cloud-Resilient Data Pipelines."
 )
 
-# --- Core Data Functions ---
+# ==========================================
+# ROBUST UNIVERSE SCRAPERS & DATA LOADERS
+# ==========================================
 
-@st.cache_data(show_spinner=False)
+DJIA_STATIC_FALLBACK = [
+    "AAPL", "AMZN", "AXP", "BA", "CAT", "CRM", "CSCO", "CVX", "DIS", "GS",
+    "HD", "HON", "IBM", "INTC", "JNJ", "JPM", "KO", "MCD", "MMM", "MRK",
+    "MSFT", "NKE", "NVDA", "PG", "SHW", "TRV", "UNH", "V", "VZ", "WMT"
+]
+
+NASDAQ100_STATIC_FALLBACK = [
+    "AAPL", "ABNB", "ADBE", "ADI", "ADP", "ADSK", "AEP", "AMAT", "AMD", "AMGN",
+    "AMZN", "ANSS", "ASML", "AVGO", "AZN", "BIIB", "BKNG", "BKR", "CDNS", "CEG",
+    "CHTR", "CMCSA", "COST", "CPRT", "CRWD", "CSCO", "CSGP", "CSX", "CTAS", "CTSH",
+    "DASH", "DDOG", "DLTR", "DXCM", "EA", "EXC", "FANG", "FAST", "FTNT", "GEHC",
+    "GFS", "GILD", "GOOG", "GOOGL", "HON", "IDXX", "ILMN", "INTC", "INTU", "ISRG",
+    "KDP", "KHC", "KLAC", "LRCX", "LULU", "MAR", "MCHP", "MDLZ", "MELI", "META",
+    "MNDZ", "MNST", "MRNA", "MRVL", "MSFT", "MU", "NFLX", "NVDA", "NXPI", "ODFL",
+    "ON", "ORLY", "PANW", "PAYX", "PCAR", "PDD", "PEP", "PYPL", "QCOM", "REGN",
+    "ROP", "ROST", "SBUX", "SNPS", "SPLK", "TEAM", "TMUS", "TSLA", "TTD", "TTWO",
+    "TXN", "VRSK", "VRTX", "WBA", "WBD", "WDAY", "XEL", "ZS"
+]
+
+@st.cache_data(show_spinner=False, ttl=86400)
 def get_universe_tickers(universe_name):
-    """Dynamically fetches stock tickers from Wikipedia tables or static lists."""
-    headers = {"User-Agent": "Mozilla/5.0"}
-    
+    """
+    Fetches tickers with browser-grade headers, automated column discovery,
+    string sanitization, and fallback sources for cloud execution.
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    }
+
+    def clean_ticker_list(raw_list):
+        cleaned = []
+        for sym in raw_list:
+            if pd.isna(sym):
+                continue
+            s = str(sym).strip().upper().replace('.', '-')
+            # Keep standard equity tickers (1-5 letters or hyphenated classes like BRK-B)
+            if re.match(r'^[A-Z]{1,5}(-[A-Z]{1,2})?$', s):
+                cleaned.append(s)
+        return list(dict.fromkeys(cleaned))
+
     def extract_wiki_symbols(url):
         try:
-            tables = pd.read_html(requests.get(url, headers=headers).text)
-            for df in tables:
-                if 'Symbol' in df.columns:
-                    return df['Symbol'].dropna().astype(str).str.replace('.', '-', regex=False).tolist()
-                elif 'Ticker' in df.columns:
-                    return df['Ticker'].dropna().astype(str).str.replace('.', '-', regex=False).tolist()
+            resp = requests.get(url, headers=headers, timeout=12)
+            if resp.status_code == 200:
+                tables = pd.read_html(resp.text)
+                for df in tables:
+                    for col in ['Symbol', 'Ticker', 'Ticker symbol']:
+                        if col in df.columns:
+                            return clean_ticker_list(df[col].dropna().tolist())
         except Exception:
             pass
         return []
 
     if universe_name == "S&P 500":
-        return extract_wiki_symbols("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
+        tickers = extract_wiki_symbols("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
+        if not tickers:
+            try:
+                fallback_url = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/master/data/constituents.csv"
+                df_fallback = pd.read_csv(fallback_url)
+                tickers = clean_ticker_list(df_fallback['Symbol'].tolist())
+            except Exception:
+                pass
+        return tickers
+
     elif universe_name == "Russell 1000":
-        return extract_wiki_symbols("https://en.wikipedia.org/wiki/List_of_Russell_1000_companies")
+        tickers = extract_wiki_symbols("https://en.wikipedia.org/wiki/List_of_Russell_1000_companies")
+        if not tickers:
+            try:
+                # Direct fallback for Russell constituents
+                url = "https://en.wikipedia.org/wiki/Russell_1000_Index"
+                tickers = extract_wiki_symbols(url)
+            except Exception:
+                pass
+        return tickers
+
     elif universe_name == "Nasdaq 100":
-        return extract_wiki_symbols("https://en.wikipedia.org/wiki/Nasdaq-100")
+        tickers = extract_wiki_symbols("https://en.wikipedia.org/wiki/Nasdaq-100")
+        if not tickers:
+            tickers = extract_wiki_symbols("https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies")
+        return tickers if tickers else NASDAQ100_STATIC_FALLBACK
+
     elif universe_name == "Dow Jones 30":
-        return extract_wiki_symbols("https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average")
+        tickers = extract_wiki_symbols("https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average")
+        return tickers if tickers else DJIA_STATIC_FALLBACK
+
     elif universe_name == "US Broad Market (~2,500+ Stocks)":
-        sp500 = extract_wiki_symbols("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
+        sp500 = get_universe_tickers("S&P 500")
         sp400 = extract_wiki_symbols("https://en.wikipedia.org/wiki/List_of_S%26P_400_companies")
         sp600 = extract_wiki_symbols("https://en.wikipedia.org/wiki/List_of_S%26P_600_companies")
-        r1000 = extract_wiki_symbols("https://en.wikipedia.org/wiki/List_of_Russell_1000_companies")
-        return list(set(sp500 + sp400 + sp600 + r1000))
+        r1000 = get_universe_tickers("Russell 1000")
+        combined = list(dict.fromkeys(sp500 + sp400 + sp600 + r1000))
+        return clean_ticker_list(combined)
+
     elif universe_name == "Major ADRs":
         return [
             "TSM", "NVO", "ASML", "BABA", "TM", "AZN", "BHP", "SAP", "SHEL", "NVS",
@@ -54,6 +119,7 @@ def get_universe_tickers(universe_name):
             "MUFG", "INFY", "BP", "RELX", "CP", "MFG", "ITUB", "CNI", "GSK", "PBR",
             "VALE", "SAN", "ERIC", "NOK", "BIDU", "JD", "PDD", "MELI", "SHOP", "SE"
         ]
+
     elif universe_name == "Major ETFs":
         return [
             "SPY", "QQQ", "DIA", "IWM", "VTI", "VOO", "VEA", "VWO", 
@@ -61,6 +127,7 @@ def get_universe_tickers(universe_name):
             "XLF", "XLE", "XLK", "XLV", "XLY", "XLI", "XLP", "XLU", "XLB", "XLRE",
             "ARKK", "SMH", "KRE", "XBI", "ITB"
         ]
+
     return []
 
 @st.cache_data(show_spinner=False)
@@ -101,6 +168,10 @@ def build_monthly_from_daily(daily_df):
 def convert_df_to_csv(df):
     return df.to_csv(index=False).encode('utf-8')
 
+# ==========================================
+# BACKTEST EXECUTION ENGINE
+# ==========================================
+
 def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_size, init_cash, trade_after_loss_only=False, require_uptrend=False):
     setups = {}
     monthly_stats = {}
@@ -131,7 +202,7 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
 
     daily_df = daily_df.copy()
     daily_df['ym'] = daily_df.index.strftime('%Y-%m')
-    last_trading_days = daily_df.groupby('ym').apply(lambda x: x.index.max()).to_dict()
+    last_trading_days = {ym: grp.index.max() for ym, grp in daily_df.groupby('ym')}
 
     all_phantom_trades = []
     in_trade = False
@@ -153,17 +224,24 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
                 
             exit_hit, exit_px, reason = False, 0.0, ""
             
+            # 1. Intra-day Stop Loss (Evaluates gaps)
             if row['Low'] <= stop_price:
                 exit_hit, reason = True, "Stop Loss"
                 exit_px = min(row['Open'], stop_price)
+                
+            # 2. Intra-day Target Hit (Evaluates gaps)
             elif target_price and row['High'] >= target_price:
-                exit_hit, reason = True, f"Target Hit"
+                exit_hit, reason = True, "Target Hit"
                 exit_px = max(row['Open'], target_price)
+                
+            # 3. Intra-day Prior Month Low Breakdown
             elif exit_type == "Prior Month Low Breakdown":
                 prior_ym = (date.replace(day=1) - timedelta(days=1)).strftime('%Y-%m')
                 if prior_ym in monthly_stats and row['Low'] < monthly_stats[prior_ym]['low']:
                     exit_hit, reason = True, "Prior Low Break"
                     exit_px = min(row['Open'], monthly_stats[prior_ym]['low'] - 0.01)
+                    
+            # 4. End of Month Exits
             elif date == last_trading_days.get(ym):
                 if exit_type == "First Red Month" and monthly_stats[ym]['is_bear']:
                     exit_hit, exit_px, reason = True, row['Close'], "1st Red Month"
@@ -206,8 +284,9 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
                     entry_adj_close = row['Adj Close']
                     target_price = entry_price + (target_mult * setup['width']) if target_mult else None
                     
+                    # Same-day execution check
                     if row['Low'] <= stop_price:
-                        exit_px = stop_price 
+                        exit_px = min(row['Open'], stop_price)
                         adj_ratio_entry = entry_adj_close / entry_raw_close
                         adj_ratio_exit = row['Adj Close'] / row['Close']
                         trade_ret = ((exit_px * adj_ratio_exit) - (entry_price * adj_ratio_entry)) / (entry_price * adj_ratio_entry)
@@ -221,6 +300,7 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
                         })
                         in_trade = False
 
+    # Apply Prior-Trade Loss Regime Filter
     final_account_trades = []
     if trade_after_loss_only and len(all_phantom_trades) > 0:
         for i in range(1, len(all_phantom_trades)):
@@ -255,9 +335,8 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
     }
     return trades_df, metrics, eq_series, drawdowns
 
-
 # ==========================================
-# UI Layout
+# USER INTERFACE LAYOUT
 # ==========================================
 tab_backtest, tab_scanner = st.tabs(["📊 Deep Backtester", "📡 Live Market Scanner"])
 
@@ -401,7 +480,7 @@ with tab_scanner:
         run_scan = st.button("🚀 Run Live Market Scan", type="primary", use_container_width=True)
         
     if universe_choice == "US Broad Market (~2,500+ Stocks)":
-        st.warning("⚠️ **Heavy Computation:** Scanning 2,500+ stocks requires downloading a massive amount of market data.")
+        st.warning("⚠️ **Heavy Computation:** Scanning 2,500+ stocks queries a substantial volume of data. It may take 2 to 4 minutes depending on network bandwidth.")
 
     if run_scan:
         progress_bar = st.progress(0)
@@ -409,9 +488,17 @@ with tab_scanner:
         
         status_text.text(f"Phase 1: Fetching {universe_choice} roster...")
         universe = get_universe_tickers(universe_choice)
+        
+        # Guard Check: Prevent yf.download([]) crashes
+        if not universe:
+            progress_bar.empty()
+            status_text.empty()
+            st.error(f"❌ Could not retrieve symbols for **{universe_choice}**. The data source temporarily blocked the cloud request. Please try selecting **Major ETFs**, **Major ADRs**, or retry in a moment.")
+            st.stop()
+            
         progress_bar.progress(10)
         
-        status_text.text(f"Phase 2: Downloading last 14 months of daily data (to calculate 12MA)...")
+        status_text.text(f"Phase 2: Downloading last 14 months of daily data for {len(universe)} symbols...")
         bulk_data = yf.download(universe, period="14mo", interval="1d", group_by="ticker", auto_adjust=False, progress=False, threads=True)
         progress_bar.progress(50)
         
@@ -501,16 +588,13 @@ with tab_scanner:
             
             progress_bar.progress(100); status_text.empty()
             
-            # --- DEFAULT PRE-SORTING LOGIC INSTALLED HERE ---
             active = cand_df[cand_df['Status'] == "Active Breakout"].copy()
             pending = cand_df[cand_df['Status'].str.startswith("Pending")].copy()
             
             if not active.empty:
-                # Pre-sort Active by Depth of Pullback (Prior Reds), then by Win Rate
                 active = active.sort_values(by=['Prior Reds', '20yr Win Rate (%)'], ascending=[False, False])
                 
             if not pending.empty:
-                # Pre-sort Pending by Depth of Pullback (Prior Reds), then by proximity to breakout trigger
                 pending['Dist'] = pending['Status'].str.extract(r'\((.*)%\)').astype(float)
                 pending = pending.sort_values(by=['Prior Reds', 'Dist'], ascending=[False, True]).drop(columns=['Dist'])
             
