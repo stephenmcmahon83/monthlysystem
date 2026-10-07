@@ -408,10 +408,38 @@ with tab_backtest:
         )
 
     trade_col_config = {
-        "Prior Red Months": st.column_config.NumberColumn(format="%d"),
-        "Entry Price": st.column_config.NumberColumn(format="$%.2f"),
-        "Exit Price": st.column_config.NumberColumn(format="$%.2f"),
-        "Return (%)": st.column_config.NumberColumn(format="%.2f%%")
+        "Prior Red Months": st.column_config.NumberColumn(
+            help="Number of consecutive red (Close < Open) months preceding the green signal month.",
+            format="%d"
+        ),
+        "Entry Date": st.column_config.TextColumn(
+            help="Calendar date when price breached the trigger price during regular trading hours."
+        ),
+        "Entry Price": st.column_config.NumberColumn(
+            help="Actual fill price (Trigger price, or the day's open if stock gapped over the trigger).",
+            format="$%.2f"
+        ),
+        "Exit Date": st.column_config.TextColumn(
+            help="Calendar date when the trade was closed by stop-loss, profit target, or system exit rule."
+        ),
+        "Exit Price": st.column_config.NumberColumn(
+            help="Actual closing fill price (adjusted for opening gap-downs below stop or gap-ups above targets).",
+            format="$%.2f"
+        ),
+        "Exit Reason": st.column_config.TextColumn(
+            help="Specific strategy rule or order condition that closed the position."
+        ),
+        "Return (%)": st.column_config.NumberColumn(
+            help="Dividend and split-adjusted percentage return on the closed trade.",
+            format="%.2f%%"
+        ),
+        "Months Held": st.column_config.NumberColumn(
+            help="Total duration the position was held in calendar months.",
+            format="%d"
+        ),
+        "Result": st.column_config.TextColumn(
+            help="Final trade outcome: Win (Return > 0%) or Loss (Return <= 0%)."
+        )
     }
 
     if st.sidebar.button("Run Backtest", type="primary", use_container_width=True):
@@ -609,10 +637,8 @@ with tab_scanner:
                             stopped_out = True
                             
                     status = "Stopped Out" if stopped_out else "Active Breakout"
-                    # Active: Distance price has moved above (+) or faded below (-) trigger
                     dist_to_trig = ((curr_px - trig) / trig) * 100
                 else:
-                    # Pending: Percentage gain required to reach trigger price
                     dist_to_trig = ((trig - curr_px) / curr_px) * 100
                     status = "Pending"
                     
@@ -676,15 +702,50 @@ with tab_scanner:
             )
             
             scanner_config = {
-                "Prior Reds": st.column_config.NumberColumn(format="%d"),
-                "Avg Vol (M)": st.column_config.NumberColumn(format="%.1fM"),
-                "Current Price": st.column_config.NumberColumn(format="$%.2f"),
-                "Trigger Price": st.column_config.NumberColumn(format="$%.2f"),
-                "Dist to Trigger (%)": st.column_config.NumberColumn(format="%+.2f%%"),
-                "Stop Loss": st.column_config.NumberColumn(format="$%.2f"),
-                "Target 3x": st.column_config.NumberColumn(format="$%.2f"),
-                "20yr Return (%)": st.column_config.NumberColumn(format="%.2f%%"),
-                "20yr Win Rate (%)": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=100)
+                "Ticker": st.column_config.TextColumn(
+                    help="Stock or ETF ticker symbol."
+                ),
+                "Status": st.column_config.TextColumn(
+                    help="Breakout Status:\n• 'Active Breakout': High breached the trigger this month without hitting the stop.\n• 'Pending': Waiting for price to cross above trigger.\n• 'Stopped Out': Triggered but subsequently breached stop-loss."
+                ),
+                "Prior Reds": st.column_config.NumberColumn(
+                    help="Consecutive nominal red months (Close < Open) immediately preceding the green signal month.",
+                    format="%d"
+                ),
+                "Avg Vol (M)": st.column_config.NumberColumn(
+                    help="6-month average monthly volume in millions of shares.",
+                    format="%.1fM"
+                ),
+                "Current Price": st.column_config.NumberColumn(
+                    help="Latest closing or real-time daily trading price.",
+                    format="$%.2f"
+                ),
+                "Trigger Price": st.column_config.NumberColumn(
+                    help="Buy Breakout Price: High of green signal month (T-1) + tick size ($0.01).",
+                    format="$%.2f"
+                ),
+                "Dist to Trigger (%)": st.column_config.NumberColumn(
+                    help="Proximity Indicator:\n• Pending: Gain required to reach trigger: (Trigger - Current) / Current.\n• Active: Distance traded above (+) or faded below (-) trigger: (Current - Trigger) / Trigger.",
+                    format="%+.2f%%"
+                ),
+                "Stop Loss": st.column_config.NumberColumn(
+                    help="Universal Protective Stop: Low of green signal month (T-1) - tick size ($0.01).",
+                    format="$%.2f"
+                ),
+                "Target 3x": st.column_config.NumberColumn(
+                    help="Profit Target: Trigger Price + (3 * (Signal High - Signal Low)).",
+                    format="$%.2f"
+                ),
+                "20yr Return (%)": st.column_config.NumberColumn(
+                    help="Cumulative compounded strategy return across 20 years for this symbol using the selected exit rule.",
+                    format="%.2f%%"
+                ),
+                "20yr Win Rate (%)": st.column_config.ProgressColumn(
+                    help="Historical percentage of winning trades over the past 20 years using the selected exit rule.",
+                    format="%.1f%%",
+                    min_value=0,
+                    max_value=100
+                )
             }
             
             st.subheader(f"🟢 Active Breakouts ({len(active)})")
