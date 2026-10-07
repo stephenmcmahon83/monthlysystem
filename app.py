@@ -211,6 +211,16 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
     in_trade = False
     handled_setups_for_month = set()
 
+    current_ym = None
+    months_held = 0
+    active_prior_reds = 0
+    entry_date = None
+    entry_price = 0.0
+    entry_raw_close = 1.0
+    entry_adj_close = 1.0
+    stop_price = 0.0
+    target_price = None
+
     target_mult = None
     if "Target: 2x" in exit_type: target_mult = 2.0
     elif "Target: 3x" in exit_type: target_mult = 3.0
@@ -345,9 +355,13 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
     prof_factor = round(gross_prof / gross_loss, 2) if gross_loss > 0 else np.nan
 
     metrics = {
-        "Trades": len(trades_df), "Win Rate (%)": win_rate, "Total Return (%)": comp_ret,
-        "B&H Return (%)": bh_ret, "Profit Factor": prof_factor, 
-        "Avg Hold (Mo)": trades_df['Months Held'].mean(), "Max Drawdown (%)": max_dd
+        "Trades": len(trades_df),
+        "Win Rate (%)": win_rate,
+        "Total Return (%)": comp_ret,
+        "B&H Return (%)": bh_ret,
+        "Profit Factor": prof_factor,
+        "Avg Hold (Mo)": trades_df['Months Held'].mean(),
+        "Max Drawdown (%)": max_dd
     }
     return trades_df, metrics, eq_series, drawdowns
 
@@ -502,6 +516,7 @@ with tab_scanner:
     st.header("Live Setup Scanner")
     st.write("Scans constituents for active breakouts and evaluates historical reliability using precise daily execution rules.")
     
+    scan_exit_options = [opt for opt in exit_options if opt != "Compare All Exits"]
     col_s1, col_s2, col_s3 = st.columns([1, 1, 1])
     with col_s1:
         universe_choice = st.selectbox(
@@ -511,8 +526,8 @@ with tab_scanner:
     with col_s2:
         scan_exit_mode = st.selectbox(
             "20yr Historical Exit Rule", 
-            options=exit_options[1:], 
-            index=1  # Default to "Target: 3x Signal Width"
+            options=scan_exit_options, 
+            index=1  # Default: "Target: 3x Signal Width"
         )
     with col_s3:
         st.write("")
@@ -680,5 +695,3 @@ with tab_scanner:
         else:
             progress_bar.progress(100); status_text.empty()
             st.info(f"No valid setups found in {universe_choice} matching current filters.")
-    metrics = {
-        "Trades":
