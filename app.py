@@ -12,7 +12,7 @@ st.set_page_config(page_title="Pro Monthly Breakout Platform", layout="wide")
 st.title("🕯️ Pro Monthly Breakout Platform")
 st.caption(
     "Setup: Consecutive Red Months -> 1 Green Month -> Buy Breakout. "
-    "Execution Engine: Daily Data with Gap Modeling, Regime Tracking & Capitulation Tagging."
+    "Execution Engine: Daily Precision with Gap Modeling, Dual Risk Models (Signal Width vs. 12M ATR) & Capitulation Tagging."
 )
 
 # ==========================================
@@ -146,6 +146,14 @@ def build_monthly_from_daily(daily_df):
     monthly['Close_Min_12'] = monthly['Close'].rolling(window=12).min()
     monthly['Close_Min_6'] = monthly['Close'].rolling(window=6).min()
     
+    # Calculate Monthly True Range (TR) and 12-Month Average Monthly ATR
+    monthly['prev_close'] = monthly['Close'].shift(1)
+    tr1 = monthly['High'] - monthly['Low']
+    tr2 = (monthly['High'] - monthly['prev_close']).abs()
+    tr3 = (monthly['Low'] - monthly['prev_close']).abs()
+    monthly['TR'] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    monthly['ATR_12'] = monthly['TR'].rolling(window=12).mean()
+    
     monthly['is_bear'] = monthly['Close'] < monthly['Open']
     red_streaks = []
     current_streak = 0
@@ -180,7 +188,7 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
         prior_red_streak = monthly_df['red_streak_count'].iloc[i-1]
         setup_valid = (prior_red_streak >= 1) and (not t1['is_bear'])
         
-        # Determine Capitulation Level for t2
+        # Tag Capitulation Level
         is_12m = False
         is_6m = False
         if not pd.isna(monthly_df['Close_Min_12'].iloc[i-1]):
@@ -195,7 +203,7 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
         else:
             cap_tag = "None"
 
-        # Capitulation Filter Rule
+        # Apply Capitulation Filter
         if capitulation_filter == "12-Month Low" and not is_12m:
             setup_valid = False
         elif capitulation_filter == "6-Month Low" and not is_6m:
@@ -206,6 +214,9 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
             if t1['Close'] <= t1['SMA_12']:
                 setup_valid = False
                 
+        # ATR Calculation for T-1 Signal Month
+        atr_val = monthly_df['ATR_12'].iloc[i] if not pd.isna(monthly_df['ATR_12'].iloc[i]) else (t1['High'] - t1['Low'])
+
         if setup_valid:
             exec_ym = (t1.name + pd.DateOffset(days=15)).strftime('%Y-%m') 
             setups[exec_ym] = {
@@ -213,7 +224,8 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
                 'capitulation': cap_tag,
                 'trigger': t1['High'] + tick_size,
                 'stop': t1['Low'] - tick_size,
-                'width': t1['High'] - t1['Low']
+                'width': t1['High'] - t1['Low'],
+                'atr': atr_val
             }
             
     final_ym = monthly_df.index[-1].strftime('%Y-%m')
@@ -238,11 +250,12 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
     stop_price = 0.0
     target_price = None
 
+    is_atr_mode = "ATR" in exit_type
     target_mult = None
-    if "Target: 2x" in exit_type: target_mult = 2.0
-    elif "Target: 3x" in exit_type: target_mult = 3.0
-    elif "Target: 5x" in exit_type: target_mult = 5.0
-    elif "Target: 10x" in exit_type: target_mult = 10.0
+    if "2x" in exit_type: target_mult = 2.0
+    elif "3x" in exit_type: target_mult = 3.0
+    elif "5x" in exit_type: target_mult = 5.0
+    elif "10x" in exit_type: target_mult = 10.0
 
     for date, row in daily_df.iterrows():
         ym = row['ym']
@@ -310,13 +323,20 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
                     
                     active_prior_reds = setup['prior_reds']
                     active_cap_tag = setup['capitulation']
-                    stop_price = setup['stop']
                     entry_price = max(row['Open'], setup['trigger'])
                     entry_raw_close = row['Close']
                     entry_adj_close = row['Adj Close']
-                    target_price = entry_price + (target_mult * setup['width']) if target_mult else None
                     
-                    # Same-day execution checks
+                    # Risk Model Assignment: ATR vs. Signal Width
+                    if is_atr_mode:
+                        atr_m = setup['atr']
+                        stop_price = max(0.01, round(entry_price - (1.0 * atr_m), 2))
+                        target_price = round(entry_price + (target_mult * atr_m), 2) if target_mult else None
+                    else:
+                        stop_price = setup['stop']
+                        target_price = round(entry_price + (target_mult * setup['width']), 2) if target_mult else None
+                    
+                    # Same-day intra-day checks
                     if row['Low'] <= stop_price:
                         exit_px = min(row['Open'], stop_price)
                         adj_ratio_entry = entry_adj_close / entry_raw_close
@@ -403,9 +423,19 @@ with tab_backtest:
     
     st.sidebar.header("2. Strategy Rules")
     exit_options = [
-        "Compare All Exits", "Target: 2x Signal Width", "Target: 3x Signal Width", 
-        "Target: 5x Signal Width", "Target: 10x Signal Width", "First Red Month", 
-        "2 Consecutive Red Months", "Hold Fixed Months", "Prior Month Low Breakdown"
+        "Compare All Exits",
+        "Target: 2x Signal Width (Bar Low Stop)",
+        "Target: 3x Signal Width (Bar Low Stop)",
+        "Target: 5x Signal Width (Bar Low Stop)",
+        "Target: 10x Signal Width (Bar Low Stop)",
+        "ATR Target: 2x ATR (1x ATR Stop)",
+        "ATR Target: 3x ATR (1x ATR Stop)",
+        "ATR Target: 5x ATR (1x ATR Stop)",
+        "ATR Target: 10x ATR (1x ATR Stop)",
+        "First Red Month",
+        "2 Consecutive Red Months",
+        "Hold Fixed Months",
+        "Prior Month Low Breakdown"
     ]
     exit_mode = st.sidebar.selectbox("Exit Rule", options=exit_options, key="bt_exit")
     hold_months_n = st.sidebar.number_input("Hold Duration (Months)", value=5, key="bt_hold") if "Hold" in exit_mode or exit_mode == "Compare All Exits" else 5
@@ -477,7 +507,7 @@ with tab_backtest:
             if exit_mode == "Compare All Exits":
                 variants = exit_options[1:]
                 comp_rows, curves = [], {}
-                with st.spinner("Simulating all variations..."):
+                with st.spinner("Simulating all Signal Width and ATR variations..."):
                     for strat in variants:
                         t_df, m, eq, _ = run_daily_execution_backtest(
                             df_daily, df_monthly, strat, hold_months_n, tick_size, 
@@ -492,7 +522,7 @@ with tab_backtest:
                 fig = go.Figure()
                 for label, curve in curves.items():
                     fig.add_trace(go.Scatter(y=curve.values, mode='lines', name=label))
-                fig.update_layout(title="Equity Compounding Across Strategies", template="plotly_dark", hovermode="x unified")
+                fig.update_layout(title="Equity Compounding Across Signal Width & ATR Strategies", template="plotly_dark", hovermode="x unified")
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 with st.spinner(f"Running exact daily execution for {ticker}..."):
@@ -580,7 +610,7 @@ with tab_scanner:
         scan_exit_mode = st.selectbox(
             "20yr Historical Exit Rule", 
             options=scan_exit_options, 
-            index=1  # Default: "Target: 3x Signal Width"
+            index=1  # Default: "Target: 3x Signal Width (Bar Low Stop)"
         )
     with col_s3:
         st.write("")
@@ -605,11 +635,11 @@ with tab_scanner:
             
         progress_bar.progress(10)
         
-        status_text.text(f"Phase 2: Downloading last 24 months of daily data (evaluating 6M/12M lows & 12MA)...")
+        status_text.text(f"Phase 2: Downloading last 24 months of daily data (evaluating ATR, 6M/12M lows & 12MA)...")
         bulk_data = yf.download(universe, period="24mo", interval="1d", group_by="ticker", auto_adjust=False, progress=False, threads=True)
         progress_bar.progress(50)
         
-        status_text.text("Phase 3: Running precise evaluations & tagging capitulation levels...")
+        status_text.text("Phase 3: Running precise evaluations & calculating ATR risk metrics...")
         candidates = []
         for sym in universe:
             try:
@@ -628,7 +658,7 @@ with tab_scanner:
                 
                 setup_valid = (prior_reds >= 1) and (not bar_t1['is_bear'])
                 
-                # Tag Capitulation Level (Displayed as column, NOT filtered out)
+                # Tag Capitulation Level
                 is_12m = False
                 is_6m = False
                 if not pd.isna(df_monthly['Close_Min_12'].iloc[-3]):
@@ -651,8 +681,15 @@ with tab_scanner:
                 if not setup_valid: continue
                 
                 trig = round(bar_t1['High'] + tick_size, 2)
-                stop = round(bar_t1['Low'] - tick_size, 2)
+                stop_signal = round(bar_t1['Low'] - tick_size, 2)
                 width = round(bar_t1['High'] - bar_t1['Low'], 2)
+                
+                # 12-Month Average Monthly ATR Calculation
+                atr_12 = df_monthly['ATR_12'].iloc[-2] if not pd.isna(df_monthly['ATR_12'].iloc[-2]) else width
+                stop_atr = max(0.01, round(trig - (1.0 * atr_12), 2))
+                
+                target_3x_width = round(trig + (3.0 * width), 2)
+                target_3x_atr = round(trig + (3.0 * atr_12), 2)
                 
                 current_month_str = df_monthly.index[-1].strftime('%Y-%m')
                 current_month_daily = df_daily[df_daily.index.strftime('%Y-%m') == current_month_str]
@@ -665,8 +702,8 @@ with tab_scanner:
                     for _, d_row in current_month_daily.iterrows():
                         if not triggered and d_row['High'] >= trig:
                             triggered = True
-                            if d_row['Low'] <= stop: stopped_out = True
-                        elif triggered and d_row['Low'] <= stop:
+                            if d_row['Low'] <= stop_signal: stopped_out = True
+                        elif triggered and d_row['Low'] <= stop_signal:
                             stopped_out = True
                             
                     status = "Stopped Out" if stopped_out else "Active Breakout"
@@ -684,8 +721,10 @@ with tab_scanner:
                     "Current Price": curr_px, 
                     "Trigger Price": trig, 
                     "Dist to Trigger (%)": round(dist_to_trig, 2),
-                    "Stop Loss": stop, 
-                    "Target 3x": round(trig + (3.0 * width), 2)
+                    "Stop (Signal Low)": stop_signal, 
+                    "Stop (1x ATR)": stop_atr,
+                    "Target 3x (Width)": target_3x_width,
+                    "Target 3x (ATR)": target_3x_atr
                 })
             except Exception: pass
             
@@ -777,15 +816,23 @@ with tab_scanner:
                     format="$%.2f"
                 ),
                 "Dist to Trigger (%)": st.column_config.NumberColumn(
-                    help="Proximity Indicator:\n• Pending: Gain needed to reach trigger: (Trigger - Current) / Current.\n• Active: Distance trading above (+) or faded below (-) trigger: (Current - Trigger) / Trigger.",
+                    help="Proximity Indicator:\n• Pending: Gain needed to reach trigger.\n• Active: Distance trading above (+) or faded below (-) trigger.",
                     format="%+.2f%%"
                 ),
-                "Stop Loss": st.column_config.NumberColumn(
-                    help="Universal Stop: Low of green signal month (T-1) - tick size ($0.01).",
+                "Stop (Signal Low)": st.column_config.NumberColumn(
+                    help="Original Stop: Low of green signal month (T-1) - tick size ($0.01).",
                     format="$%.2f"
                 ),
-                "Target 3x": st.column_config.NumberColumn(
-                    help="Profit Target: Trigger Price + (3 * (Signal High - Signal Low)).",
+                "Stop (1x ATR)": st.column_config.NumberColumn(
+                    help="ATR Stop: Trigger Price minus 1x 12-Month Average Monthly ATR.",
+                    format="$%.2f"
+                ),
+                "Target 3x (Width)": st.column_config.NumberColumn(
+                    help="Signal Width Target: Trigger Price + (3 * (Signal High - Signal Low)).",
+                    format="$%.2f"
+                ),
+                "Target 3x (ATR)": st.column_config.NumberColumn(
+                    help="ATR Target: Trigger Price + (3 * 12-Month Average Monthly ATR).",
                     format="$%.2f"
                 ),
                 "20yr Return (%)": st.column_config.NumberColumn(
