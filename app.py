@@ -12,7 +12,7 @@ st.set_page_config(page_title="Pro Monthly Breakout Platform", layout="wide")
 st.title("🕯️ Pro Monthly Breakout Platform")
 st.caption(
     "Setup: Consecutive Red Months -> 1 Green Month (Lower High) -> Buy Breakout. "
-    "Execution Engine: Daily Precision with Gap Modeling, Dual Risk Models & Capitulation Tagging."
+    "Execution Engine: Daily Precision with Gap Modeling, Dual Risk Models (Signal Width vs. 12M ATR) & Fast/Deep Multi-Universe Scanning."
 )
 
 # ==========================================
@@ -189,7 +189,7 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
         prior_red_streak = monthly_df['red_streak_count'].iloc[i-1]
         setup_valid = (prior_red_streak >= 1) and (not t1['is_bear'])
         
-        # 1. Lower High Rule: High of signal bar must be below High of prior red bar
+        # 1. Lower High Rule: Signal bar high strictly below prior red bar high
         if require_lower_high and (t1['High'] >= t2['High']):
             setup_valid = False
 
@@ -608,7 +608,7 @@ with tab_scanner:
     st.write("Scans constituents for active breakouts and evaluates historical reliability using precise daily execution rules.")
     
     scan_exit_options = [opt for opt in exit_options if opt != "Compare All Exits"]
-    col_s1, col_s2, col_s3 = st.columns([1, 1, 1])
+    col_s1, col_s2, col_s3, col_s4 = st.columns([1.2, 1.2, 1.1, 1])
     with col_s1:
         universe_choice = st.selectbox(
             "Market Universe", 
@@ -621,9 +621,15 @@ with tab_scanner:
             index=1  # Default: "Target: 3x Signal Width (Bar Low Stop)"
         )
     with col_s3:
+        run_hist_val = st.checkbox(
+            "Run 20yr Historical Backtest", 
+            value=True, 
+            help="Uncheck to run a lightning-fast scan (<8s). Check to run deep 20-year backtests on all setups."
+        )
+    with col_s4:
         st.write("")
         st.write("")
-        run_scan = st.button("🚀 Run Live Market Scan", type="primary", use_container_width=True)
+        run_scan = st.button("🚀 Run Live Scan", type="primary", use_container_width=True)
         
     if universe_choice == "US Broad Market (~2,500+ Stocks)":
         st.warning("⚠️ **Heavy Computation:** Scanning 2,500+ stocks queries a substantial volume of data. It may take 2 to 4 minutes depending on network bandwidth.")
@@ -743,5 +749,169 @@ with tab_scanner:
         
         cand_df = pd.DataFrame(candidates)
         if not cand_df.empty:
-            status_text.text(f"Phase 4: Running 20-Year Validations for {len(candidates)} setups using '{scan_exit_mode}'...")
-            cand_tickers = cand_df['Ticker'].tolist()
+            if run_hist_val:
+                status_text.text(f"Phase 4: Running 20-Year Validations for {len(candidates)} setups using '{scan_exit_mode}'...")
+                cand_tickers = cand_df['Ticker'].tolist()
+                
+                hist_daily_data = yf.download(cand_tickers, period="20y", interval="1d", group_by="ticker", auto_adjust=False, progress=False, threads=True)
+                
+                win_rates, tot_rets, bh_rets, sys_dds, bh_dds = [], [], [], [], []
+                for sym in cand_tickers:
+                    try:
+                        df_sym = hist_daily_data[sym].copy() if len(cand_tickers) > 1 else hist_daily_data.copy()
+                        if isinstance(df_sym.columns, pd.MultiIndex): df_sym.columns = [c[0] for c in df_sym.columns]
+                        
+                        bh_ret = ((df_sym['Adj Close'].iloc[-1] / df_sym['Adj Close'].iloc[0]) - 1) * 100
+                        bh_cummax = df_sym['Adj Close'].cummax()
+                        bh_dd = ((df_sym['Adj Close'] - bh_cummax) / bh_cummax).min() * 100
+
+                        df_monthly_hist = build_monthly_from_daily(df_sym)
+                        _, m, _, _ = run_daily_execution_backtest(
+                            df_sym, df_monthly_hist, scan_exit_mode, hold_months_n, 
+                            tick_size, init_cash, trade_after_loss_only, require_uptrend, capitulation_filter, require_lower_high 
+                        )
+                        
+                        win_rates.append(round(m.get('Win Rate (%)', 0), 1))
+                        tot_rets.append(round(m.get('Total Return (%)', 0), 1))
+                        bh_rets.append(round(bh_ret, 1))
+                        sys_dds.append(round(m.get('Max Drawdown (%)', 0), 1))
+                        bh_dds.append(round(bh_dd, 1))
+                    except Exception:
+                        win_rates.append(0.0)
+                        tot_rets.append(0.0)
+                        bh_rets.append(0.0)
+                        sys_dds.append(0.0)
+                        bh_dds.append(0.0)
+
+                cand_df['20yr Return (%)'] = tot_rets
+                cand_df['20yr B&H Return (%)'] = bh_rets
+                cand_df['System Max DD (%)'] = sys_dds
+                cand_df['B&H Max DD (%)'] = bh_dds
+                cand_df['20yr Win Rate (%)'] = win_rates
+            else:
+                cand_df['20yr Return (%)'] = np.nan
+                cand_df['20yr B&H Return (%)'] = np.nan
+                cand_df['System Max DD (%)'] = np.nan
+                cand_df['B&H Max DD (%)'] = np.nan
+                cand_df['20yr Win Rate (%)'] = np.nan
+            
+            progress_bar.progress(100)
+            status_text.empty()
+            
+            active = cand_df[cand_df['Status'] == "Active Breakout"].copy()
+            pending = cand_df[cand_df['Status'] == "Pending"].copy()
+            
+            if not active.empty:
+                sort_cols = ['Prior Reds', '20yr Win Rate (%)'] if run_hist_val else ['Prior Reds', 'Current Price']
+                active = active.sort_values(by=sort_cols, ascending=[False, False])
+                
+            if not pending.empty:
+                pending = pending.sort_values(by=['Prior Reds', 'Dist to Trigger (%)'], ascending=[False, True])
+            
+            st.download_button(
+                label="📥 Download Scan Results as CSV",
+                data=convert_df_to_csv(cand_df),
+                file_name=f"{universe_choice}_scan_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime='text/csv'
+            )
+            
+            scanner_config = {
+                "Ticker": st.column_config.TextColumn(
+                    help="Stock or ETF ticker symbol."
+                ),
+                "Status": st.column_config.TextColumn(
+                    help="Breakout Status:\n• 'Active Breakout': High breached trigger this month without hitting stop.\n• 'Pending': Waiting for price to cross above trigger.\n• 'Stopped Out': Triggered but subsequently breached stop-loss."
+                ),
+                "Capitulation": st.column_config.TextColumn(
+                    help="Capitulation Status of the T-2 Red Month:\n• '12-Month': Prior red month closed at a 12-month low.\n• '6-Month': Prior red month closed at a 6-month low (but not 12-month).\n• 'None': Pullback did not make a 6-month or 12-month closing low."
+                ),
+                "Prior Reds": st.column_config.NumberColumn(
+                    help="Consecutive red months (Close < Open) immediately preceding the green signal month.",
+                    format="%d"
+                ),
+                "Avg Vol (M)": st.column_config.NumberColumn(
+                    help="6-month average monthly volume in millions of shares.",
+                    format="%.1fM"
+                ),
+                "Current Price": st.column_config.NumberColumn(
+                    help="Latest daily closing/trading price.",
+                    format="$%.2f"
+                ),
+                "Trigger Price": st.column_config.NumberColumn(
+                    help="Buy Breakout Price: High of green signal month (T-1) + tick size ($0.01).",
+                    format="$%.2f"
+                ),
+                "Dist to Trigger (%)": st.column_config.NumberColumn(
+                    help="Proximity Indicator:\n• Pending: Gain needed to reach trigger.\n• Active: Distance trading above (+) or faded below (-) trigger.",
+                    format="%+.2f%%"
+                ),
+                "Stop (Signal Low)": st.column_config.NumberColumn(
+                    help="Original Stop: Low of green signal month (T-1) - tick size ($0.01).",
+                    format="$%.2f"
+                ),
+                "Stop (1x ATR)": st.column_config.NumberColumn(
+                    help="ATR Stop: Trigger Price minus 1x 12-Month Average Monthly ATR.",
+                    format="$%.2f"
+                ),
+                "Target 3x (Width)": st.column_config.NumberColumn(
+                    help="Signal Width Target: Trigger Price + (3 * (Signal High - Signal Low)).",
+                    format="$%.2f"
+                ),
+                "Target 3x (ATR)": st.column_config.NumberColumn(
+                    help="ATR Target: Trigger Price + (3 * 12-Month Average Monthly ATR).",
+                    format="$%.2f"
+                ),
+                "20yr Return (%)": st.column_config.NumberColumn(
+                    help="Strategy Return: Compounded strategy return over 20 years using the selected exit rule. Highlighted GREEN if it beats Buy & Hold, RED if it underperforms.",
+                    format="%.2f%%"
+                ),
+                "20yr B&H Return (%)": st.column_config.NumberColumn(
+                    help="Buy & Hold Return: Baseline compounded 20-year return from simply holding the asset.",
+                    format="%.2f%%"
+                ),
+                "System Max DD (%)": st.column_config.NumberColumn(
+                    help="System Drawdown: Worst peak-to-trough account drawdown suffered by this strategy over 20 years.",
+                    format="%.1f%%"
+                ),
+                "B&H Max DD (%)": st.column_config.NumberColumn(
+                    help="Buy & Hold Drawdown: Worst peak-to-trough drawdown suffered by simply holding the asset over 20 years.",
+                    format="%.1f%%"
+                ),
+                "20yr Win Rate (%)": st.column_config.ProgressColumn(
+                    help="Strategy Win Rate: Percentage of completed trades that produced a positive return.",
+                    format="%.1f%%",
+                    min_value=0,
+                    max_value=100
+                )
+            }
+            
+            def highlight_vs_bh(row):
+                styles = [''] * len(row)
+                if '20yr Return (%)' in row.index and '20yr B&H Return (%)' in row.index:
+                    col_idx = row.index.get_loc('20yr Return (%)')
+                    sys_ret = row['20yr Return (%)']
+                    bh_ret = row['20yr B&H Return (%)']
+                    if pd.notna(sys_ret) and pd.notna(bh_ret):
+                        if sys_ret >= bh_ret:
+                            styles[col_idx] = 'background-color: rgba(0, 200, 83, 0.25); color: #00FF66; font-weight: bold;'
+                        else:
+                            styles[col_idx] = 'background-color: rgba(255, 51, 85, 0.25); color: #FF4B4B; font-weight: bold;'
+                return styles
+
+            st.subheader(f"🟢 Active Breakouts ({len(active)})")
+            if not active.empty:
+                styled_active = active.style.apply(highlight_vs_bh, axis=1) if run_hist_val else active
+                st.dataframe(styled_active, column_config=scanner_config, use_container_width=True)
+            else:
+                st.info("No active breakouts found matching current filters.")
+            
+            st.subheader(f"🟡 Pending Setups Waiting for Breakout ({len(pending)})")
+            if not pending.empty:
+                styled_pending = pending.style.apply(highlight_vs_bh, axis=1) if run_hist_val else pending
+                st.dataframe(styled_pending, column_config=scanner_config, use_container_width=True)
+            else:
+                st.info("No pending setups found matching current filters.")
+        else:
+            progress_bar.progress(100)
+            status_text.empty()
+            st.info(f"No valid setups found in {universe_choice} matching current filters.")
