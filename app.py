@@ -11,8 +11,8 @@ st.set_page_config(page_title="Pro Monthly Breakout Platform", layout="wide")
 
 st.title("🕯️ Pro Monthly Breakout Platform")
 st.caption(
-    "Setup: Consecutive Red Months -> 1 Green Month (Lower High) -> Buy Breakout. "
-    "Execution Engine: Daily Precision with Gap Modeling, Dual Risk Models (Signal Width vs. 12M ATR) & Fast/Deep Multi-Universe Scanning."
+    "Universal Monthly Engine: Parametric Sequences (Red Reversals & Green Momentum) | "
+    "Decoupled Stops (T-1, T-2, Streak Base, ATR) | Daily Precision with Gap Modeling."
 )
 
 # ==========================================
@@ -47,8 +47,7 @@ def get_universe_tickers(universe_name):
     def clean_ticker_list(raw_list):
         cleaned = []
         for sym in raw_list:
-            if pd.isna(sym):
-                continue
+            if pd.isna(sym): continue
             s = str(sym).strip().upper().replace('.', '-')
             if re.match(r'^[A-Z]{1,5}(-[A-Z]{1,2})?$', s):
                 cleaned.append(s)
@@ -77,7 +76,6 @@ def get_universe_tickers(universe_name):
             except Exception:
                 pass
         return tickers
-
     elif universe_name == "Russell 1000":
         tickers = extract_wiki_symbols("https://en.wikipedia.org/wiki/List_of_Russell_1000_companies")
         if not tickers:
@@ -86,17 +84,14 @@ def get_universe_tickers(universe_name):
             except Exception:
                 pass
         return tickers
-
     elif universe_name == "Nasdaq 100":
         tickers = extract_wiki_symbols("https://en.wikipedia.org/wiki/Nasdaq-100")
         if not tickers:
             tickers = extract_wiki_symbols("https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies")
         return tickers if tickers else NASDAQ100_STATIC_FALLBACK
-
     elif universe_name == "Dow Jones 30":
         tickers = extract_wiki_symbols("https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average")
         return tickers if tickers else DJIA_STATIC_FALLBACK
-
     elif universe_name == "US Broad Market (~2,500+ Stocks)":
         sp500 = get_universe_tickers("S&P 500")
         sp400 = extract_wiki_symbols("https://en.wikipedia.org/wiki/List_of_S%26P_400_companies")
@@ -104,7 +99,6 @@ def get_universe_tickers(universe_name):
         r1000 = get_universe_tickers("Russell 1000")
         combined = list(dict.fromkeys(sp500 + sp400 + sp600 + r1000))
         return clean_ticker_list(combined)
-
     elif universe_name == "Major ADRs":
         return [
             "TSM", "NVO", "ASML", "BABA", "TM", "AZN", "BHP", "SAP", "SHEL", "NVS",
@@ -112,7 +106,6 @@ def get_universe_tickers(universe_name):
             "MUFG", "INFY", "BP", "RELX", "CP", "MFG", "ITUB", "CNI", "GSK", "PBR",
             "VALE", "SAN", "ERIC", "NOK", "BIDU", "JD", "PDD", "MELI", "SHOP", "SE"
         ]
-
     elif universe_name == "Major ETFs":
         return [
             "SPY", "QQQ", "DIA", "IWM", "VTI", "VOO", "VEA", "VWO", 
@@ -120,7 +113,6 @@ def get_universe_tickers(universe_name):
             "XLF", "XLE", "XLK", "XLV", "XLY", "XLI", "XLP", "XLU", "XLB", "XLRE",
             "ARKK", "SMH", "KRE", "XBI", "ITB"
         ]
-
     return []
 
 @st.cache_data(show_spinner=False)
@@ -129,12 +121,27 @@ def fetch_daily_data(symbol, start=None, end=None, period=None):
         daily = yf.download(symbol, period=period, auto_adjust=False, progress=False)
     else:
         daily = yf.download(symbol, start=start, end=end, auto_adjust=False, progress=False)
-        
-    if daily.empty:
-        return None
+    if daily.empty: return None
     if isinstance(daily.columns, pd.MultiIndex):
         daily.columns = [col[0] for col in daily.columns]
     return daily
+
+def extract_symbol_daily(bulk_data, sym, universe_size):
+    try:
+        if universe_size == 1:
+            df = bulk_data.copy()
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = [c[0] for c in df.columns]
+            return df.dropna(how='all')
+        if not isinstance(bulk_data.columns, pd.MultiIndex):
+            return pd.DataFrame()
+        if sym in bulk_data.columns.levels[0]:
+            return bulk_data[sym].copy().dropna(how='all')
+        elif sym in bulk_data.columns.levels[1]:
+            return bulk_data.xs(sym, axis=1, level=1).copy().dropna(how='all')
+    except Exception:
+        pass
+    return pd.DataFrame()
 
 def build_monthly_from_daily(daily_df):
     monthly = daily_df.resample('ME').agg({
@@ -154,16 +161,25 @@ def build_monthly_from_daily(daily_df):
     monthly['ATR_12'] = monthly['TR'].rolling(window=12).mean()
     
     monthly['is_bear'] = monthly['Close'] < monthly['Open']
-    red_streaks = []
-    current_streak = 0
-    for is_bear in monthly['is_bear']:
-        if is_bear:
-            current_streak += 1
-        else:
-            current_streak = 0
-        red_streaks.append(current_streak)
-    monthly['red_streak_count'] = red_streaks
+    monthly['is_bull'] = monthly['Close'] > monthly['Open']
     
+    red_streaks, green_streaks = [], []
+    r_curr, g_curr = 0, 0
+    for _, row in monthly.iterrows():
+        if row['is_bear']:
+            r_curr += 1
+            g_curr = 0
+        elif row['is_bull']:
+            g_curr += 1
+            r_curr = 0
+        else:
+            r_curr = 0
+            g_curr = 0
+        red_streaks.append(r_curr)
+        green_streaks.append(g_curr)
+        
+    monthly['red_streak_count'] = red_streaks
+    monthly['green_streak_count'] = green_streaks
     return monthly
 
 @st.cache_data(show_spinner=False)
@@ -171,29 +187,38 @@ def convert_df_to_csv(df):
     return df.to_csv(index=False).encode('utf-8')
 
 # ==========================================
-# BACKTEST EXECUTION ENGINE
+# UNIFIED BACKTEST EXECUTION ENGINE
 # ==========================================
 
-def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_size, init_cash, 
-                                trade_after_loss_only=False, require_uptrend=False, 
-                                capitulation_filter="None", require_lower_high=True):
+def run_daily_execution_backtest(daily_df, monthly_df, seq_type, min_streak, signal_color,
+                                stop_rule, exit_type, hold_n, tick_size, init_cash,
+                                trade_after_loss_only=False, require_uptrend=False,
+                                capitulation_filter="None", require_lower_high=False):
     setups = {}
     monthly_stats = {}
     
-    for i in range(1, len(monthly_df) - 1):
-        t1 = monthly_df.iloc[i]       # Signal month (Green)
-        t2 = monthly_df.iloc[i-1]     # Prior month (Red)
+    for i in range(2, len(monthly_df) - 1):
+        t1 = monthly_df.iloc[i]       # Signal month (T-1)
+        t2 = monthly_df.iloc[i-1]     # Prior month (T-2)
         ym = t1.name.strftime('%Y-%m')
-        monthly_stats[ym] = {'is_bear': t1['is_bear'], 'low': t1['Low']}
+        monthly_stats[ym] = {'is_bear': t1['is_bear'], 'low': t1['Low'], 'high': t1['High']}
         
-        prior_red_streak = monthly_df['red_streak_count'].iloc[i-1]
-        setup_valid = (prior_red_streak >= 1) and (not t1['is_bear'])
-        
-        # 1. Lower High Rule: Signal bar high strictly below prior red bar high
+        # 1. Preceding Streak Check (T-2 backwards)
+        prior_streak = monthly_df['red_streak_count'].iloc[i-1] if "Red" in seq_type else monthly_df['green_streak_count'].iloc[i-1]
+        if prior_streak < min_streak:
+            continue
+            
+        # 2. Signal Bar Color
+        if signal_color == "Green Only" and not t1['is_bull']:
+            continue
+        elif signal_color == "Red Only" and not t1['is_bear']:
+            continue
+            
+        # 3. Lower High Constraint (T-1 High < T-2 High)
         if require_lower_high and (t1['High'] >= t2['High']):
-            setup_valid = False
+            continue
 
-        # 2. Tag Capitulation Level
+        # 4. Capitulation Tag / Filter on Prior Month (T-2)
         is_12m = False
         is_6m = False
         if not pd.isna(monthly_df['Close_Min_12'].iloc[i-1]):
@@ -201,39 +226,49 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
         if not pd.isna(monthly_df['Close_Min_6'].iloc[i-1]):
             is_6m = t2['Close'] <= (monthly_df['Close_Min_6'].iloc[i-1] + 1e-4)
 
-        if is_12m:
-            cap_tag = "12-Month"
-        elif is_6m:
-            cap_tag = "6-Month"
-        else:
-            cap_tag = "None"
-
-        # Apply Capitulation Filter
+        cap_tag = "12-Month" if is_12m else ("6-Month" if is_6m else "None")
         if capitulation_filter == "12-Month Low" and not is_12m:
-            setup_valid = False
+            continue
         elif capitulation_filter == "6-Month Low" and not is_6m:
-            setup_valid = False
+            continue
 
-        # Long-Term Trend Filter
-        if require_uptrend and not pd.isna(t1['SMA_12']):
-            if t1['Close'] <= t1['SMA_12']:
-                setup_valid = False
-                
-        atr_val = monthly_df['ATR_12'].iloc[i] if not pd.isna(monthly_df['ATR_12'].iloc[i]) else (t1['High'] - t1['Low'])
+        # 5. Bull Market SMA12 Trend Filter
+        if require_uptrend and not pd.isna(t1['SMA_12']) and t1['Close'] <= t1['SMA_12']:
+            continue
 
-        if setup_valid:
-            exec_ym = (t1.name + pd.DateOffset(days=15)).strftime('%Y-%m') 
-            setups[exec_ym] = {
-                'prior_reds': prior_red_streak,
-                'capitulation': cap_tag,
-                'trigger': t1['High'] + tick_size,
-                'stop': t1['Low'] - tick_size,
-                'width': t1['High'] - t1['Low'],
-                'atr': atr_val
-            }
-            
+        trigger_price = round(t1['High'] + tick_size, 2)
+        atr_12 = monthly_df['ATR_12'].iloc[i] if not pd.isna(monthly_df['ATR_12'].iloc[i]) else (t1['High'] - t1['Low'])
+
+        # 6. Stop-Loss Selection
+        if stop_rule == "Signal Month Low (T-1 Low)":
+            stop_price = round(t1['Low'] - tick_size, 2)
+        elif stop_rule == "Prior Month Low (T-2 Low)":
+            stop_price = round(t2['Low'] - tick_size, 2)
+        elif stop_rule == "Lowest Low of Streak":
+            lookback = min(i, prior_streak + 1)
+            stop_price = round(monthly_df['Low'].iloc[i-lookback:i].min() - tick_size, 2)
+        elif stop_rule == "1x 12M ATR Stop":
+            stop_price = max(0.01, round(trigger_price - (1.0 * atr_12), 2))
+        else:
+            stop_price = round(t1['Low'] - tick_size, 2)
+
+        risk_unit = trigger_price - stop_price
+        if risk_unit <= 0:
+            continue
+
+        exec_ym = (t1.name + pd.DateOffset(days=15)).strftime('%Y-%m')
+        setups[exec_ym] = {
+            'streak': prior_streak,
+            'capitulation': cap_tag,
+            'trigger': trigger_price,
+            'stop': stop_price,
+            'risk_unit': risk_unit,
+            'width': t1['High'] - t1['Low'],
+            'atr': atr_12
+        }
+
     final_ym = monthly_df.index[-1].strftime('%Y-%m')
-    monthly_stats[final_ym] = {'is_bear': monthly_df.iloc[-1]['is_bear'], 'low': monthly_df.iloc[-1]['Low']}
+    monthly_stats[final_ym] = {'is_bear': monthly_df.iloc[-1]['is_bear'], 'low': monthly_df.iloc[-1]['Low'], 'high': monthly_df.iloc[-1]['High']}
 
     daily_df = daily_df.copy()
     daily_df['ym'] = daily_df.index.strftime('%Y-%m')
@@ -245,7 +280,7 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
 
     current_ym = None
     months_held = 0
-    active_prior_reds = 0
+    active_streak = 0
     active_cap_tag = "None"
     entry_date = None
     entry_price = 0.0
@@ -253,10 +288,13 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
     entry_adj_close = 1.0
     stop_price = 0.0
     target_price = None
+    active_risk_unit = 1.0
 
-    is_atr_mode = "ATR" in exit_type
+    # Parse target multiple
+    is_atr_exit = "ATR Target" in exit_type
     target_mult = None
-    if "2x" in exit_type: target_mult = 2.0
+    if "1x" in exit_type: target_mult = 1.0
+    elif "2x" in exit_type: target_mult = 2.0
     elif "3x" in exit_type: target_mult = 3.0
     elif "5x" in exit_type: target_mult = 5.0
     elif "10x" in exit_type: target_mult = 10.0
@@ -271,14 +309,14 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
                 
             exit_hit, exit_px, reason = False, 0.0, ""
             
-            # Stop Loss Check
+            # Intraday Stop Loss
             if row['Low'] <= stop_price:
                 exit_hit, reason = True, "Stop Loss"
                 exit_px = min(row['Open'], stop_price)
                 
-            # Target Check
+            # Intraday Target Multiple
             elif target_price and row['High'] >= target_price:
-                exit_hit, reason = True, "Target Hit"
+                exit_hit, reason = True, f"Target {target_mult}R"
                 exit_px = max(row['Open'], target_price)
                 
             # Prior Month Low Breakdown
@@ -303,14 +341,21 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
                 adj_ratio_entry = entry_adj_close / entry_raw_close
                 adj_ratio_exit = row['Adj Close'] / row['Close']
                 trade_ret = ((exit_px * adj_ratio_exit) - (entry_price * adj_ratio_entry)) / (entry_price * adj_ratio_entry)
+                r_realized = (exit_px - entry_price) / active_risk_unit if active_risk_unit > 0 else 0
                 
                 all_phantom_trades.append({
+                    "Streak": active_streak,
                     "Capitulation": active_cap_tag,
-                    "Prior Red Months": active_prior_reds,
-                    "Entry Date": entry_date.strftime('%Y-%m-%d'), "Entry Price": round(entry_price, 2),
-                    "Exit Date": date.strftime('%Y-%m-%d'), "Exit Price": round(exit_px, 2),
-                    "Exit Reason": reason, "Return (%)": round(trade_ret * 100, 2),
-                    "Months Held": months_held, "Result": "Win" if trade_ret > 0 else "Loss"
+                    "Entry Date": entry_date.strftime('%Y-%m-%d'),
+                    "Entry Price": round(entry_price, 2),
+                    "Stop Price": round(stop_price, 2),
+                    "Exit Date": date.strftime('%Y-%m-%d'),
+                    "Exit Price": round(exit_px, 2),
+                    "Exit Reason": reason,
+                    "Return (%)": round(trade_ret * 100, 2),
+                    "Realized R": round(r_realized, 2),
+                    "Months Held": months_held,
+                    "Result": "Win" if trade_ret > 0 else "Loss"
                 })
                 in_trade = False
 
@@ -325,21 +370,23 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
                     current_ym = ym
                     months_held = 0
                     
-                    active_prior_reds = setup['prior_reds']
+                    active_streak = setup['streak']
                     active_cap_tag = setup['capitulation']
                     entry_price = max(row['Open'], setup['trigger'])
                     entry_raw_close = row['Close']
                     entry_adj_close = row['Adj Close']
+                    stop_price = setup['stop']
+                    active_risk_unit = setup['risk_unit']
                     
-                    if is_atr_mode:
-                        atr_m = setup['atr']
-                        stop_price = max(0.01, round(entry_price - (1.0 * atr_m), 2))
-                        target_price = round(entry_price + (target_mult * atr_m), 2) if target_mult else None
+                    # Target Calculation
+                    if is_atr_exit:
+                        target_price = round(entry_price + (target_mult * setup['atr']), 2) if target_mult else None
+                    elif target_mult:
+                        target_price = round(entry_price + (target_mult * active_risk_unit), 2)
                     else:
-                        stop_price = setup['stop']
-                        target_price = round(entry_price + (target_mult * setup['width']), 2) if target_mult else None
+                        target_price = None
                     
-                    # Same-day checks
+                    # Same-day intra-day checks
                     if row['Low'] <= stop_price:
                         exit_px = min(row['Open'], stop_price)
                         adj_ratio_entry = entry_adj_close / entry_raw_close
@@ -347,12 +394,18 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
                         trade_ret = ((exit_px * adj_ratio_exit) - (entry_price * adj_ratio_entry)) / (entry_price * adj_ratio_entry)
                         
                         all_phantom_trades.append({
+                            "Streak": active_streak,
                             "Capitulation": active_cap_tag,
-                            "Prior Red Months": active_prior_reds,
-                            "Entry Date": entry_date.strftime('%Y-%m-%d'), "Entry Price": round(entry_price, 2),
-                            "Exit Date": date.strftime('%Y-%m-%d'), "Exit Price": round(exit_px, 2),
-                            "Exit Reason": "Stop Loss (Same Day)", "Return (%)": round(trade_ret * 100, 2),
-                            "Months Held": 0, "Result": "Win" if trade_ret > 0 else "Loss"
+                            "Entry Date": entry_date.strftime('%Y-%m-%d'),
+                            "Entry Price": round(entry_price, 2),
+                            "Stop Price": round(stop_price, 2),
+                            "Exit Date": date.strftime('%Y-%m-%d'),
+                            "Exit Price": round(exit_px, 2),
+                            "Exit Reason": "Stop Loss (Same Day)",
+                            "Return (%)": round(trade_ret * 100, 2),
+                            "Realized R": -1.0,
+                            "Months Held": 0,
+                            "Result": "Loss"
                         })
                         in_trade = False
                     elif target_price and row['High'] >= target_price:
@@ -362,12 +415,18 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
                         trade_ret = ((exit_px * adj_ratio_exit) - (entry_price * adj_ratio_entry)) / (entry_price * adj_ratio_entry)
                         
                         all_phantom_trades.append({
+                            "Streak": active_streak,
                             "Capitulation": active_cap_tag,
-                            "Prior Red Months": active_prior_reds,
-                            "Entry Date": entry_date.strftime('%Y-%m-%d'), "Entry Price": round(entry_price, 2),
-                            "Exit Date": date.strftime('%Y-%m-%d'), "Exit Price": round(exit_px, 2),
-                            "Exit Reason": "Target Hit (Same Day)", "Return (%)": round(trade_ret * 100, 2),
-                            "Months Held": 0, "Result": "Win" if trade_ret > 0 else "Loss"
+                            "Entry Date": entry_date.strftime('%Y-%m-%d'),
+                            "Entry Price": round(entry_price, 2),
+                            "Stop Price": round(stop_price, 2),
+                            "Exit Date": date.strftime('%Y-%m-%d'),
+                            "Exit Price": round(exit_px, 2),
+                            "Exit Reason": "Target Hit (Same Day)",
+                            "Return (%)": round(trade_ret * 100, 2),
+                            "Realized R": target_mult if target_mult else 1.0,
+                            "Months Held": 0,
+                            "Result": "Win" if trade_ret > 0 else "Loss"
                         })
                         in_trade = False
 
@@ -384,7 +443,7 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
 
     if trades_df.empty:
         eq = pd.Series([init_cash], index=[daily_df.index[0]])
-        return trades_df, {"Win Rate (%)": 0, "Total Return (%)": 0, "B&H Return (%)": bh_ret, "Max Drawdown (%)": 0}, eq, eq
+        return trades_df, {"Trades": 0, "Win Rate (%)": 0, "Total Return (%)": 0, "B&H Return (%)": bh_ret, "Profit Factor": np.nan, "Max Drawdown (%)": 0, "Avg R Realized": 0}, eq, eq
     
     win_rate = (len(trades_df[trades_df['Result'] == 'Win']) / len(trades_df)) * 100
     comp_ret = ((1 + trades_df['Return (%)'] / 100).prod() - 1) * 100
@@ -400,12 +459,13 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
 
     metrics = {
         "Trades": len(trades_df),
-        "Win Rate (%)": win_rate,
-        "Total Return (%)": comp_ret,
-        "B&H Return (%)": bh_ret,
+        "Win Rate (%)": round(win_rate, 1),
+        "Total Return (%)": round(comp_ret, 1),
+        "B&H Return (%)": round(bh_ret, 1),
         "Profit Factor": prof_factor,
-        "Avg Hold (Mo)": trades_df['Months Held'].mean(),
-        "Max Drawdown (%)": max_dd
+        "Avg Hold (Mo)": round(trades_df['Months Held'].mean(), 1),
+        "Max Drawdown (%)": round(max_dd, 1),
+        "Avg R Realized": round(trades_df['Realized R'].mean(), 2)
     }
     return trades_df, metrics, eq_series, drawdowns
 
@@ -414,95 +474,95 @@ def run_daily_execution_backtest(daily_df, monthly_df, exit_type, hold_n, tick_s
 # ==========================================
 tab_backtest, tab_scanner = st.tabs(["📊 Deep Backtester", "📡 Live Market Scanner"])
 
-# ----------------- BACKTESTER -----------------
-with tab_backtest:
-    st.sidebar.header("1. Data Parameters")
-    ticker = st.sidebar.text_input("Ticker Symbol", value="SPY", key="bt_ticker").upper().strip()
-    
-    col1, col2 = st.sidebar.columns(2)
-    today = datetime.now().date()
-    start_date = col1.date_input("Start", value=today - timedelta(days=25 * 365), key="bt_start")
-    end_date = col2.date_input("End", value=today, key="bt_end")
-    
-    st.sidebar.header("2. Strategy Rules")
-    exit_options = [
-        "Compare All Exits",
-        "Target: 2x Signal Width (Bar Low Stop)",
-        "Target: 3x Signal Width (Bar Low Stop)",
-        "Target: 5x Signal Width (Bar Low Stop)",
-        "Target: 10x Signal Width (Bar Low Stop)",
-        "ATR Target: 2x ATR (1x ATR Stop)",
-        "ATR Target: 3x ATR (1x ATR Stop)",
-        "ATR Target: 5x ATR (1x ATR Stop)",
-        "ATR Target: 10x ATR (1x ATR Stop)",
-        "First Red Month",
-        "2 Consecutive Red Months",
-        "Hold Fixed Months",
-        "Prior Month Low Breakdown"
-    ]
-    exit_mode = st.sidebar.selectbox("Exit Rule", options=exit_options, key="bt_exit")
-    hold_months_n = st.sidebar.number_input("Hold Duration (Months)", value=5, key="bt_hold") if "Hold" in exit_mode or exit_mode == "Compare All Exits" else 5
-    
-    with st.sidebar.expander("⚙️ Advanced Filters & Risk", expanded=True):
-        tick_size = st.number_input("Breakout Tick Size ($)", min_value=0.01, value=0.01, key="bt_tick")
-        init_cash = st.number_input("Starting Capital ($)", value=10000, key="bt_cash")
-        require_lower_high = st.checkbox(
-            "Contained Pullback Filter: Signal High < Prior Red High", 
-            value=True, 
-            help="Requires the High of the green signal month to be strictly lower than the High of the preceding red month."
-        )
-        capitulation_filter = st.selectbox(
-            "Capitulation Filter (Prior Red Close)", 
-            options=["None", "6-Month Low", "12-Month Low"],
-            index=0,
-            help="Filters for trades where the last red bar closed at a 6-month or 12-month low."
-        )
-        require_uptrend = st.checkbox(
-            "Bull Market Filter (Close > 12-Month SMA)", 
-            value=False, 
-            help="Avoids taking breakouts during secular bear markets."
-        )
-        trade_after_loss_only = st.checkbox(
-            "Regime Filter (Only trade if prior trade lost)", 
-            value=False
-        )
+# --- SIDEBAR CONFIGURATION ---
+st.sidebar.header("1. Asset & Historical Scope")
+ticker = st.sidebar.text_input("Ticker Symbol", value="SPY", key="bt_ticker").upper().strip()
+col1, col2 = st.sidebar.columns(2)
+today = datetime.now().date()
+start_date = col1.date_input("Start", value=today - timedelta(days=25 * 365), key="bt_start")
+end_date = col2.date_input("End", value=today, key="bt_end")
 
+st.sidebar.header("2. Preceding Sequence Setup")
+seq_type = st.sidebar.selectbox(
+    "Sequence Type", 
+    ["Red Months (Mean-Reversion)", "Green Months (Trend-Continuation)"], 
+    key="sb_seq_type"
+)
+min_streak = st.sidebar.number_input("Min Preceding Months (X)", min_value=1, max_value=12, value=2, key="sb_min_streak")
+signal_color = st.sidebar.selectbox("Signal Bar (T-1) Color", ["Green Only", "Any Color", "Red Only"], index=0, key="sb_sig_col")
+
+st.sidebar.header("3. Risk & Stop-Loss Architecture")
+stop_rule = st.sidebar.selectbox(
+    "Stop-Loss Definition",
+    [
+        "Prior Month Low (T-2 Low)", 
+        "Signal Month Low (T-1 Low)", 
+        "Lowest Low of Streak", 
+        "1x 12M ATR Stop"
+    ],
+    index=0,
+    key="sb_stop_rule",
+    help="Sets the initial protective stop-loss and establishes the unit of risk (1R = Trigger - Stop)."
+)
+
+st.sidebar.header("4. Strategy Exit Rules")
+exit_options = [
+    "Compare All Exits",
+    "Target: 1x Risk Unit (1R)",
+    "Target: 2x Risk Unit (2R)",
+    "Target: 3x Risk Unit (3R)",
+    "Target: 5x Risk Unit (5R)",
+    "Target: 10x Risk Unit (10R)",
+    "ATR Target: 2x ATR",
+    "ATR Target: 3x ATR",
+    "ATR Target: 5x ATR",
+    "First Red Month",
+    "2 Consecutive Red Months",
+    "Hold Fixed Months",
+    "Prior Month Low Breakdown"
+]
+exit_mode = st.sidebar.selectbox("Exit Rule", options=exit_options, index=3, key="bt_exit") # Default to 3R
+hold_months_n = st.sidebar.number_input("Hold Duration (Months)", value=5, key="bt_hold") if "Hold" in exit_mode or exit_mode == "Compare All Exits" else 5
+
+with st.sidebar.expander("⚙️ Advanced Regime Filters & Sizing", expanded=False):
+    tick_size = st.number_input("Breakout Tick Size ($)", min_value=0.01, value=0.01, key="bt_tick")
+    init_cash = st.number_input("Starting Capital ($)", value=10000, key="bt_cash")
+    require_lower_high = st.checkbox(
+        "Contained Setup: Signal High < Prior Month High", 
+        value=False, 
+        help="Ensures the green signal month hasn't already broken out over the prior month's high."
+    )
+    capitulation_filter = st.selectbox(
+        "Capitulation Filter (Prior Red Close)", 
+        options=["None", "6-Month Low", "12-Month Low"],
+        index=0,
+        help="Filters for trades where the last red bar closed at a 6-month or 12-month low."
+    )
+    require_uptrend = st.checkbox(
+        "Bull Market Filter (Close > 12-Month SMA)", 
+        value=False, 
+        help="Avoids taking breakouts during secular bear markets."
+    )
+    trade_after_loss_only = st.checkbox(
+        "Regime Filter (Only trade if prior trade lost)", 
+        value=False
+    )
+
+# ----------------- BACKTESTER TAB -----------------
+with tab_backtest:
     trade_col_config = {
-        "Capitulation": st.column_config.TextColumn(
-            help="Capitulation depth of preceding red month: '12-Month', '6-Month', or 'None'."
-        ),
-        "Prior Red Months": st.column_config.NumberColumn(
-            help="Number of consecutive red (Close < Open) months preceding the green signal month.",
-            format="%d"
-        ),
-        "Entry Date": st.column_config.TextColumn(
-            help="Calendar date when price breached the trigger price during regular trading hours."
-        ),
-        "Entry Price": st.column_config.NumberColumn(
-            help="Actual fill price (Trigger price, or the day's open if stock gapped over the trigger).",
-            format="$%.2f"
-        ),
-        "Exit Date": st.column_config.TextColumn(
-            help="Calendar date when the trade was closed by stop-loss, profit target, or system exit rule."
-        ),
-        "Exit Price": st.column_config.NumberColumn(
-            help="Actual closing fill price (adjusted for opening gap-downs below stop or gap-ups above targets).",
-            format="$%.2f"
-        ),
-        "Exit Reason": st.column_config.TextColumn(
-            help="Specific strategy rule or order condition that closed the position."
-        ),
-        "Return (%)": st.column_config.NumberColumn(
-            help="Dividend and split-adjusted percentage return on the closed trade.",
-            format="%.2f%%"
-        ),
-        "Months Held": st.column_config.NumberColumn(
-            help="Total duration the position was held in calendar months.",
-            format="%d"
-        ),
-        "Result": st.column_config.TextColumn(
-            help="Final trade outcome: Win (Return > 0%) or Loss (Return <= 0%)."
-        )
+        "Streak": st.column_config.NumberColumn(help="Preceding sequence streak count.", format="%d"),
+        "Capitulation": st.column_config.TextColumn(help="Capitulation depth: 12-Month, 6-Month, or None."),
+        "Entry Date": st.column_config.TextColumn(help="Date filled during regular market hours."),
+        "Entry Price": st.column_config.NumberColumn(help="Fill price (Trigger price or open gap).", format="$%.2f"),
+        "Stop Price": st.column_config.NumberColumn(help="Assigned protective stop-loss.", format="$%.2f"),
+        "Exit Date": st.column_config.TextColumn(help="Date closed by system rule."),
+        "Exit Price": st.column_config.NumberColumn(help="Exit fill price.", format="$%.2f"),
+        "Exit Reason": st.column_config.TextColumn(help="Order condition that closed trade."),
+        "Return (%)": st.column_config.NumberColumn(help="Split & dividend adjusted return.", format="%.2f%%"),
+        "Realized R": st.column_config.NumberColumn(help="Realized return divided by initial 1R risk.", format="%+.2fR"),
+        "Months Held": st.column_config.NumberColumn(help="Duration in calendar months.", format="%d"),
+        "Result": st.column_config.TextColumn(help="Trade outcome: Win or Loss.")
     }
 
     if st.sidebar.button("Run Backtest", type="primary", use_container_width=True):
@@ -515,42 +575,47 @@ with tab_backtest:
             if exit_mode == "Compare All Exits":
                 variants = exit_options[1:]
                 comp_rows, curves = [], {}
-                with st.spinner("Simulating all Signal Width and ATR variations..."):
+                with st.spinner("Simulating all strategy variations..."):
                     for strat in variants:
                         t_df, m, eq, _ = run_daily_execution_backtest(
-                            df_daily, df_monthly, strat, hold_months_n, tick_size, 
-                            init_cash, trade_after_loss_only, require_uptrend, capitulation_filter, require_lower_high
+                            df_daily, df_monthly, seq_type, min_streak, signal_color,
+                            stop_rule, strat, hold_months_n, tick_size, init_cash,
+                            trade_after_loss_only, require_uptrend, capitulation_filter, require_lower_high
                         )
                         curves[strat] = eq
                         row = {"Exit Strategy": strat}
                         row.update(m)
                         comp_rows.append(row)
                 
-                st.dataframe(pd.DataFrame(comp_rows).set_index("Exit Strategy").style.format(precision=2), use_container_width=True)
+                st.subheader(f"📊 Strategy Comparison Across Exits for {ticker}")
+                st.dataframe(pd.DataFrame(comp_rows).set_index("Exit Strategy"), use_container_width=True)
+                
                 fig = go.Figure()
                 for label, curve in curves.items():
                     fig.add_trace(go.Scatter(y=curve.values, mode='lines', name=label))
-                fig.update_layout(title="Equity Compounding Across Signal Width & ATR Strategies", template="plotly_dark", hovermode="x unified")
+                fig.update_layout(title="Equity Compounding Across Strategies", template="plotly_dark", hovermode="x unified")
                 st.plotly_chart(fig, use_container_width=True)
             else:
-                with st.spinner(f"Running exact daily execution for {ticker}..."):
+                with st.spinner(f"Running daily execution backtest for {ticker}..."):
                     t_df, metrics, eq, dd = run_daily_execution_backtest(
-                        df_daily, df_monthly, exit_mode, hold_months_n, tick_size, 
-                        init_cash, trade_after_loss_only, require_uptrend, capitulation_filter, require_lower_high
+                        df_daily, df_monthly, seq_type, min_streak, signal_color,
+                        stop_rule, exit_mode, hold_months_n, tick_size, init_cash,
+                        trade_after_loss_only, require_uptrend, capitulation_filter, require_lower_high
                     )
                 
-                c1, c2, c3, c4, c5 = st.columns(5)
+                c1, c2, c3, c4, c5, c6 = st.columns(6)
                 c1.metric("Strategy Return", f"{metrics.get('Total Return (%)', 0):,.2f}%")
                 c2.metric("Buy & Hold Return", f"{metrics.get('B&H Return (%)', 0):,.2f}%")
                 c3.metric("Win Rate", f"{metrics.get('Win Rate (%)', 0):.1f}%")
                 c4.metric("Profit Factor", f"{metrics.get('Profit Factor', 0)}")
-                c5.metric("Max Drawdown", f"{metrics.get('Max Drawdown (%)', 0):.1f}%")
+                c5.metric("Avg Realized R", f"{metrics.get('Avg R Realized', 0):+.2f}R")
+                c6.metric("Max Drawdown", f"{metrics.get('Max Drawdown (%)', 0):.1f}%")
                 
                 col_chart1, col_chart2 = st.columns(2)
                 with col_chart1:
                     fig_eq = go.Figure()
                     fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.values, mode='lines+markers', name='Equity', line=dict(color='#00FF66')))
-                    fig_eq.update_layout(title="Account Growth", template="plotly_dark", margin=dict(l=20, r=20, t=40, b=20))
+                    fig_eq.update_layout(title="Account Equity ($)", template="plotly_dark", margin=dict(l=20, r=20, t=40, b=20))
                     st.plotly_chart(fig_eq, use_container_width=True)
                 with col_chart2:
                     fig_dd = go.Figure()
@@ -559,10 +624,10 @@ with tab_backtest:
                     st.plotly_chart(fig_dd, use_container_width=True)
                 
                 if not t_df.empty:
-                    st.subheader("📊 Performance Breakdown by Prior Red Streak")
+                    st.subheader("📊 Performance Breakdown by Preceding Streak Length")
                     streak_summary = []
-                    for streak in sorted(t_df['Prior Red Months'].unique()):
-                        subset = t_df[t_df['Prior Red Months'] == streak]
+                    for s_val in sorted(t_df['Streak'].unique()):
+                        subset = t_df[t_df['Streak'] == s_val]
                         s_wins = len(subset[subset['Result'] == 'Win'])
                         s_total = len(subset)
                         s_wr = (s_wins / s_total) * 100
@@ -572,23 +637,25 @@ with tab_backtest:
                         s_pf = round(s_g_prof / s_g_loss, 2) if s_g_loss > 0 else np.nan
                         
                         streak_summary.append({
-                            "Prior Red Streak": f"{streak} Month(s)",
+                            "Preceding Streak": f"{s_val} Month(s)",
                             "Trades": s_total,
                             "Win Rate (%)": s_wr,
                             "Profit Factor": s_pf,
-                            "Total Return (%)": s_comp
+                            "Total Return (%)": s_comp,
+                            "Avg Realized R": subset['Realized R'].mean()
                         })
                     
                     st.dataframe(
-                        pd.DataFrame(streak_summary).set_index("Prior Red Streak").style.format({
+                        pd.DataFrame(streak_summary).set_index("Preceding Streak").style.format({
                             "Win Rate (%)": "{:.1f}%",
                             "Profit Factor": "{:.2f}",
-                            "Total Return (%)": "{:,.2f}%"
+                            "Total Return (%)": "{:,.2f}%",
+                            "Avg Realized R": "{:+.2f}R"
                         }),
                         use_container_width=True
                     )
 
-                st.subheader("Trade Log")
+                st.subheader("Trade Audit Log")
                 if not t_df.empty:
                     st.download_button(
                         label="📥 Download Trade Log as CSV",
@@ -602,10 +669,10 @@ with tab_backtest:
                     use_container_width=True
                 )
 
-# ----------------- SCANNER -----------------
+# ----------------- SCANNER TAB -----------------
 with tab_scanner:
     st.header("Live Setup Scanner")
-    st.write("Scans constituents for active breakouts and evaluates historical reliability using precise daily execution rules.")
+    st.write("Scans constituents for active breakouts using the exact parameters and stop-loss logic defined in the sidebar.")
     
     scan_exit_options = [opt for opt in exit_options if opt != "Compare All Exits"]
     col_s1, col_s2, col_s3, col_s4 = st.columns([1.2, 1.2, 1.1, 1])
@@ -615,16 +682,12 @@ with tab_scanner:
             options=["S&P 500", "Russell 1000", "US Broad Market (~2,500+ Stocks)", "Nasdaq 100", "Dow Jones 30", "Major ADRs", "Major ETFs"]
         )
     with col_s2:
-        scan_exit_mode = st.selectbox(
-            "20yr Historical Exit Rule", 
-            options=scan_exit_options, 
-            index=1  # Default: "Target: 3x Signal Width (Bar Low Stop)"
-        )
+        scan_exit_mode = st.selectbox("20yr Historical Exit Rule", options=scan_exit_options, index=2)
     with col_s3:
         run_hist_val = st.checkbox(
             "Run 20yr Historical Backtest", 
-            value=True, 
-            help="Uncheck to run a lightning-fast scan (<8s). Check to run deep 20-year backtests on all setups."
+            value=False, 
+            help="Unchecked = Instant Setup Scan (<8s). Checked = Also runs deep 20-year backtests on active breakouts."
         )
     with col_s4:
         st.write("")
@@ -632,7 +695,7 @@ with tab_scanner:
         run_scan = st.button("🚀 Run Live Scan", type="primary", use_container_width=True)
         
     if universe_choice == "US Broad Market (~2,500+ Stocks)":
-        st.warning("⚠️ **Heavy Computation:** Scanning 2,500+ stocks queries a substantial volume of data. It may take 2 to 4 minutes depending on network bandwidth.")
+        st.warning("⚠️ Scanning 2,500+ stocks queries a substantial volume of data. It may take 1 to 2 minutes depending on network bandwidth.")
 
     if run_scan:
         progress_bar = st.progress(0)
@@ -644,20 +707,20 @@ with tab_scanner:
         if not universe:
             progress_bar.empty()
             status_text.empty()
-            st.error(f"❌ Could not retrieve symbols for **{universe_choice}**. The data source temporarily blocked the cloud request. Please try selecting **Major ETFs**, **Major ADRs**, or retry in a moment.")
+            st.error(f"❌ Could not retrieve symbols for **{universe_choice}**. Temporary data provider block. Please select **Major ETFs** or retry.")
             st.stop()
             
-        progress_bar.progress(10)
+        progress_bar.progress(15)
         
-        status_text.text(f"Phase 2: Downloading last 24 months of daily data (evaluating ATR, 6M/12M lows & 12MA)...")
+        status_text.text(f"Phase 2: Downloading last 24 months of daily data for {len(universe)} symbols...")
         bulk_data = yf.download(universe, period="24mo", interval="1d", group_by="ticker", auto_adjust=False, progress=False, threads=True)
-        progress_bar.progress(50)
+        progress_bar.progress(60)
         
-        status_text.text("Phase 3: Running evaluations & applying Contained Pullback filters...")
+        status_text.text("Phase 3: Detecting breakouts and calculating trigger metrics...")
         candidates = []
         for sym in universe:
             try:
-                df_daily = bulk_data[sym].dropna() if len(universe) > 1 else bulk_data.dropna()
+                df_daily = extract_symbol_daily(bulk_data, sym, len(universe))
                 if len(df_daily) < 60: continue
                 
                 df_monthly = build_monthly_from_daily(df_daily)
@@ -668,15 +731,15 @@ with tab_scanner:
                 
                 bar_t1 = df_monthly.iloc[-2]
                 bar_t2 = df_monthly.iloc[-3]
-                prior_reds = df_monthly['red_streak_count'].iloc[-3]
                 
-                setup_valid = (prior_reds >= 1) and (not bar_t1['is_bear'])
+                prior_streak = df_monthly['red_streak_count'].iloc[-3] if "Red" in seq_type else df_monthly['green_streak_count'].iloc[-3]
+                if prior_streak < min_streak: continue
                 
-                # Lower High / Contained Pullback check
-                if require_lower_high and (bar_t1['High'] >= bar_t2['High']):
-                    setup_valid = False
+                if signal_color == "Green Only" and not bar_t1['is_bull']: continue
+                elif signal_color == "Red Only" and not bar_t1['is_bear']: continue
                 
-                # Tag Capitulation Level
+                if require_lower_high and (bar_t1['High'] >= bar_t2['High']): continue
+                
                 is_12m = False
                 is_6m = False
                 if not pd.isna(df_monthly['Close_Min_12'].iloc[-3]):
@@ -684,43 +747,48 @@ with tab_scanner:
                 if not pd.isna(df_monthly['Close_Min_6'].iloc[-3]):
                     is_6m = bar_t2['Close'] <= (df_monthly['Close_Min_6'].iloc[-3] + 1e-4)
 
-                if is_12m:
-                    cap_tag = "12-Month"
-                elif is_6m:
-                    cap_tag = "6-Month"
-                else:
-                    cap_tag = "None"
+                cap_tag = "12-Month" if is_12m else ("6-Month" if is_6m else "None")
+                if capitulation_filter == "12-Month Low" and not is_12m: continue
+                elif capitulation_filter == "6-Month Low" and not is_6m: continue
 
-                # Bull Market Filter
-                if require_uptrend and not pd.isna(bar_t1['SMA_12']):
-                    if bar_t1['Close'] <= bar_t1['SMA_12']:
-                        setup_valid = False
-                        
-                if not setup_valid: continue
+                if require_uptrend and not pd.isna(bar_t1['SMA_12']) and bar_t1['Close'] <= bar_t1['SMA_12']:
+                    continue
                 
                 trig = round(bar_t1['High'] + tick_size, 2)
-                stop_signal = round(bar_t1['Low'] - tick_size, 2)
-                width = round(bar_t1['High'] - bar_t1['Low'], 2)
+                atr_12 = df_monthly['ATR_12'].iloc[-2] if not pd.isna(df_monthly['ATR_12'].iloc[-2]) else (bar_t1['High'] - bar_t1['Low'])
+
+                # Stop calculation according to selected rule
+                if stop_rule == "Signal Month Low (T-1 Low)":
+                    stop_px = round(bar_t1['Low'] - tick_size, 2)
+                elif stop_rule == "Prior Month Low (T-2 Low)":
+                    stop_px = round(bar_t2['Low'] - tick_size, 2)
+                elif stop_rule == "Lowest Low of Streak":
+                    lookback = min(len(df_monthly)-1, prior_streak + 1)
+                    stop_px = round(df_monthly['Low'].iloc[-lookback-1:-1].min() - tick_size, 2)
+                elif stop_rule == "1x 12M ATR Stop":
+                    stop_px = max(0.01, round(trig - (1.0 * atr_12), 2))
+                else:
+                    stop_px = round(bar_t1['Low'] - tick_size, 2)
+
+                r_unit = trig - stop_px
+                if r_unit <= 0: continue
                 
-                atr_12 = df_monthly['ATR_12'].iloc[-2] if not pd.isna(df_monthly['ATR_12'].iloc[-2]) else width
-                stop_atr = max(0.01, round(trig - (1.0 * atr_12), 2))
-                
-                target_3x_width = round(trig + (3.0 * width), 2)
+                target_3r = round(trig + (3.0 * r_unit), 2)
                 target_3x_atr = round(trig + (3.0 * atr_12), 2)
                 
                 current_month_str = df_monthly.index[-1].strftime('%Y-%m')
                 current_month_daily = df_daily[df_daily.index.strftime('%Y-%m') == current_month_str]
                 
-                curr_px = round(current_month_daily['Close'].iloc[-1], 2)
-                curr_high = round(current_month_daily['High'].max(), 2)
+                curr_px = round(df_daily['Close'].iloc[-1], 2)
+                curr_high = round(current_month_daily['High'].max(), 2) if not current_month_daily.empty else curr_px
                 
                 if curr_high >= trig:
                     triggered, stopped_out = False, False
                     for _, d_row in current_month_daily.iterrows():
                         if not triggered and d_row['High'] >= trig:
                             triggered = True
-                            if d_row['Low'] <= stop_signal: stopped_out = True
-                        elif triggered and d_row['Low'] <= stop_signal:
+                            if d_row['Low'] <= stop_px: stopped_out = True
+                        elif triggered and d_row['Low'] <= stop_px:
                             stopped_out = True
                             
                     status = "Stopped Out" if stopped_out else "Active Breakout"
@@ -732,34 +800,36 @@ with tab_scanner:
                 candidates.append({
                     "Ticker": sym, 
                     "Status": status, 
+                    "Streak": prior_streak,
                     "Capitulation": cap_tag,
-                    "Prior Reds": prior_reds,
                     "Avg Vol (M)": round(avg_vol_m, 1),
                     "Current Price": curr_px, 
                     "Trigger Price": trig, 
                     "Dist to Trigger (%)": round(dist_to_trig, 2),
-                    "Stop (Signal Low)": stop_signal, 
-                    "Stop (1x ATR)": stop_atr,
-                    "Target 3x (Width)": target_3x_width,
-                    "Target 3x (ATR)": target_3x_atr
+                    f"Stop ({stop_rule.split(' ')[0]})": stop_px,
+                    "Target 3R": target_3r,
+                    "Target 3x ATR": target_3x_atr
                 })
             except Exception: pass
             
-        progress_bar.progress(70)
+        progress_bar.progress(85)
         
         cand_df = pd.DataFrame(candidates)
         if not cand_df.empty:
-            if run_hist_val:
-                status_text.text(f"Phase 4: Running 20-Year Validations for {len(candidates)} setups using '{scan_exit_mode}'...")
-                cand_tickers = cand_df['Ticker'].tolist()
+            active = cand_df[cand_df['Status'] == "Active Breakout"].copy()
+            pending = cand_df[cand_df['Status'] == "Pending"].copy()
+            
+            if run_hist_val and not active.empty:
+                status_text.text(f"Phase 4: Running 20-Year Validations for {len(active)} active breakouts...")
+                active_tickers = active['Ticker'].tolist()
                 
-                hist_daily_data = yf.download(cand_tickers, period="20y", interval="1d", group_by="ticker", auto_adjust=False, progress=False, threads=True)
+                hist_daily_data = yf.download(active_tickers, period="20y", interval="1d", group_by="ticker", auto_adjust=False, progress=False, threads=True)
                 
                 win_rates, tot_rets, bh_rets, sys_dds, bh_dds = [], [], [], [], []
-                for sym in cand_tickers:
+                for sym in active_tickers:
                     try:
-                        df_sym = hist_daily_data[sym].copy() if len(cand_tickers) > 1 else hist_daily_data.copy()
-                        if isinstance(df_sym.columns, pd.MultiIndex): df_sym.columns = [c[0] for c in df_sym.columns]
+                        df_sym = extract_symbol_daily(hist_daily_data, sym, len(active_tickers))
+                        if len(df_sym) < 60: raise ValueError("Insufficient data")
                         
                         bh_ret = ((df_sym['Adj Close'].iloc[-1] / df_sym['Adj Close'].iloc[0]) - 1) * 100
                         bh_cummax = df_sym['Adj Close'].cummax()
@@ -767,8 +837,9 @@ with tab_scanner:
 
                         df_monthly_hist = build_monthly_from_daily(df_sym)
                         _, m, _, _ = run_daily_execution_backtest(
-                            df_sym, df_monthly_hist, scan_exit_mode, hold_months_n, 
-                            tick_size, init_cash, trade_after_loss_only, require_uptrend, capitulation_filter, require_lower_high 
+                            df_sym, df_monthly_hist, seq_type, min_streak, signal_color,
+                            stop_rule, scan_exit_mode, hold_months_n, tick_size, init_cash,
+                            trade_after_loss_only, require_uptrend, capitulation_filter, require_lower_high 
                         )
                         
                         win_rates.append(round(m.get('Win Rate (%)', 0), 1))
@@ -777,112 +848,61 @@ with tab_scanner:
                         sys_dds.append(round(m.get('Max Drawdown (%)', 0), 1))
                         bh_dds.append(round(bh_dd, 1))
                     except Exception:
-                        win_rates.append(0.0)
-                        tot_rets.append(0.0)
-                        bh_rets.append(0.0)
-                        sys_dds.append(0.0)
-                        bh_dds.append(0.0)
+                        win_rates.append(0.0); tot_rets.append(0.0); bh_rets.append(0.0); sys_dds.append(0.0); bh_dds.append(0.0)
 
-                cand_df['20yr Return (%)'] = tot_rets
-                cand_df['20yr B&H Return (%)'] = bh_rets
-                cand_df['System Max DD (%)'] = sys_dds
-                cand_df['B&H Max DD (%)'] = bh_dds
-                cand_df['20yr Win Rate (%)'] = win_rates
+                active['20yr Return (%)'] = tot_rets
+                active['20yr B&H Return (%)'] = bh_rets
+                active['System Max DD (%)'] = sys_dds
+                active['B&H Max DD (%)'] = bh_dds
+                active['20yr Win Rate (%)'] = win_rates
             else:
-                cand_df['20yr Return (%)'] = np.nan
-                cand_df['20yr B&H Return (%)'] = np.nan
-                cand_df['System Max DD (%)'] = np.nan
-                cand_df['B&H Max DD (%)'] = np.nan
-                cand_df['20yr Win Rate (%)'] = np.nan
-            
+                active['20yr Return (%)'] = np.nan
+                active['20yr B&H Return (%)'] = np.nan
+                active['System Max DD (%)'] = np.nan
+                active['B&H Max DD (%)'] = np.nan
+                active['20yr Win Rate (%)'] = np.nan
+
+            pending['20yr Return (%)'] = np.nan
+            pending['20yr B&H Return (%)'] = np.nan
+            pending['System Max DD (%)'] = np.nan
+            pending['B&H Max DD (%)'] = np.nan
+            pending['20yr Win Rate (%)'] = np.nan
+
             progress_bar.progress(100)
             status_text.empty()
             
-            active = cand_df[cand_df['Status'] == "Active Breakout"].copy()
-            pending = cand_df[cand_df['Status'] == "Pending"].copy()
-            
             if not active.empty:
-                sort_cols = ['Prior Reds', '20yr Win Rate (%)'] if run_hist_val else ['Prior Reds', 'Current Price']
+                sort_cols = ['Streak', '20yr Win Rate (%)'] if run_hist_val else ['Streak', 'Current Price']
                 active = active.sort_values(by=sort_cols, ascending=[False, False])
                 
             if not pending.empty:
-                pending = pending.sort_values(by=['Prior Reds', 'Dist to Trigger (%)'], ascending=[False, True])
+                pending = pending.sort_values(by=['Streak', 'Dist to Trigger (%)'], ascending=[False, True])
             
             st.download_button(
                 label="📥 Download Scan Results as CSV",
-                data=convert_df_to_csv(cand_df),
+                data=convert_df_to_csv(pd.concat([active, pending], ignore_index=True)),
                 file_name=f"{universe_choice}_scan_{datetime.now().strftime('%Y%m%d')}.csv",
                 mime='text/csv'
             )
             
+            stop_col_name = f"Stop ({stop_rule.split(' ')[0]})"
             scanner_config = {
-                "Ticker": st.column_config.TextColumn(
-                    help="Stock or ETF ticker symbol."
-                ),
-                "Status": st.column_config.TextColumn(
-                    help="Breakout Status:\n• 'Active Breakout': High breached trigger this month without hitting stop.\n• 'Pending': Waiting for price to cross above trigger.\n• 'Stopped Out': Triggered but subsequently breached stop-loss."
-                ),
-                "Capitulation": st.column_config.TextColumn(
-                    help="Capitulation Status of the T-2 Red Month:\n• '12-Month': Prior red month closed at a 12-month low.\n• '6-Month': Prior red month closed at a 6-month low (but not 12-month).\n• 'None': Pullback did not make a 6-month or 12-month closing low."
-                ),
-                "Prior Reds": st.column_config.NumberColumn(
-                    help="Consecutive red months (Close < Open) immediately preceding the green signal month.",
-                    format="%d"
-                ),
-                "Avg Vol (M)": st.column_config.NumberColumn(
-                    help="6-month average monthly volume in millions of shares.",
-                    format="%.1fM"
-                ),
-                "Current Price": st.column_config.NumberColumn(
-                    help="Latest daily closing/trading price.",
-                    format="$%.2f"
-                ),
-                "Trigger Price": st.column_config.NumberColumn(
-                    help="Buy Breakout Price: High of green signal month (T-1) + tick size ($0.01).",
-                    format="$%.2f"
-                ),
-                "Dist to Trigger (%)": st.column_config.NumberColumn(
-                    help="Proximity Indicator:\n• Pending: Gain needed to reach trigger.\n• Active: Distance trading above (+) or faded below (-) trigger.",
-                    format="%+.2f%%"
-                ),
-                "Stop (Signal Low)": st.column_config.NumberColumn(
-                    help="Original Stop: Low of green signal month (T-1) - tick size ($0.01).",
-                    format="$%.2f"
-                ),
-                "Stop (1x ATR)": st.column_config.NumberColumn(
-                    help="ATR Stop: Trigger Price minus 1x 12-Month Average Monthly ATR.",
-                    format="$%.2f"
-                ),
-                "Target 3x (Width)": st.column_config.NumberColumn(
-                    help="Signal Width Target: Trigger Price + (3 * (Signal High - Signal Low)).",
-                    format="$%.2f"
-                ),
-                "Target 3x (ATR)": st.column_config.NumberColumn(
-                    help="ATR Target: Trigger Price + (3 * 12-Month Average Monthly ATR).",
-                    format="$%.2f"
-                ),
-                "20yr Return (%)": st.column_config.NumberColumn(
-                    help="Strategy Return: Compounded strategy return over 20 years using the selected exit rule. Highlighted GREEN if it beats Buy & Hold, RED if it underperforms.",
-                    format="%.2f%%"
-                ),
-                "20yr B&H Return (%)": st.column_config.NumberColumn(
-                    help="Buy & Hold Return: Baseline compounded 20-year return from simply holding the asset.",
-                    format="%.2f%%"
-                ),
-                "System Max DD (%)": st.column_config.NumberColumn(
-                    help="System Drawdown: Worst peak-to-trough account drawdown suffered by this strategy over 20 years.",
-                    format="%.1f%%"
-                ),
-                "B&H Max DD (%)": st.column_config.NumberColumn(
-                    help="Buy & Hold Drawdown: Worst peak-to-trough drawdown suffered by simply holding the asset over 20 years.",
-                    format="%.1f%%"
-                ),
-                "20yr Win Rate (%)": st.column_config.ProgressColumn(
-                    help="Strategy Win Rate: Percentage of completed trades that produced a positive return.",
-                    format="%.1f%%",
-                    min_value=0,
-                    max_value=100
-                )
+                "Ticker": st.column_config.TextColumn(help="Ticker symbol."),
+                "Status": st.column_config.TextColumn(help="Active Breakout vs Pending setup."),
+                "Streak": st.column_config.NumberColumn(help=f"Preceding {seq_type.split(' ')[0]} month streak count.", format="%d"),
+                "Capitulation": st.column_config.TextColumn(help="Capitulation depth: 12M, 6M, or None."),
+                "Avg Vol (M)": st.column_config.NumberColumn(help="6-month average monthly volume.", format="%.1fM"),
+                "Current Price": st.column_config.NumberColumn(help="Latest closing or trading price.", format="$%.2f"),
+                "Trigger Price": st.column_config.NumberColumn(help="Buy Trigger: Signal High + tick size.", format="$%.2f"),
+                "Dist to Trigger (%)": st.column_config.NumberColumn(help="Proximity Indicator.", format="%+.2f%%"),
+                stop_col_name: st.column_config.NumberColumn(help=f"Active Stop-Loss calculated via {stop_rule}.", format="$%.2f"),
+                "Target 3R": st.column_config.NumberColumn(help="Profit Target: Trigger + 3x Risk Unit (1R).", format="$%.2f"),
+                "Target 3x ATR": st.column_config.NumberColumn(help="Profit Target: Trigger + 3x 12M ATR.", format="$%.2f"),
+                "20yr Return (%)": st.column_config.NumberColumn(help="Compounded 20-year strategy return.", format="%.2f%%"),
+                "20yr B&H Return (%)": st.column_config.NumberColumn(help="Baseline 20-year Buy & Hold return.", format="%.2f%%"),
+                "System Max DD (%)": st.column_config.NumberColumn(help="Maximum historical strategy drawdown.", format="%.1f%%"),
+                "B&H Max DD (%)": st.column_config.NumberColumn(help="Maximum Buy & Hold drawdown.", format="%.1f%%"),
+                "20yr Win Rate (%)": st.column_config.ProgressColumn(help="Historical win rate over 20 years.", format="%.1f%%", min_value=0, max_value=100)
             }
             
             def highlight_vs_bh(row):
@@ -903,15 +923,14 @@ with tab_scanner:
                 styled_active = active.style.apply(highlight_vs_bh, axis=1) if run_hist_val else active
                 st.dataframe(styled_active, column_config=scanner_config, use_container_width=True)
             else:
-                st.info("No active breakouts found matching current filters.")
+                st.info("No active breakouts currently found matching these criteria.")
             
             st.subheader(f"🟡 Pending Setups Waiting for Breakout ({len(pending)})")
             if not pending.empty:
-                styled_pending = pending.style.apply(highlight_vs_bh, axis=1) if run_hist_val else pending
-                st.dataframe(styled_pending, column_config=scanner_config, use_container_width=True)
+                st.dataframe(pending, column_config=scanner_config, use_container_width=True)
             else:
-                st.info("No pending setups found matching current filters.")
+                st.info("No pending setups currently found matching these criteria.")
         else:
             progress_bar.progress(100)
             status_text.empty()
-            st.info(f"No valid setups found in {universe_choice} matching current filters.")
+            st.info(f"No setups found in {universe_choice} matching current parameters.")
